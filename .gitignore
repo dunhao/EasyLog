@@ -24,6 +24,7 @@ services/admin/storage/framework/sessions/*
 services/admin/storage/framework/views/*
 services/admin/storage/logs/*.log
 services/admin/storage/app/*
+!services/admin/storage/app/public/
 !services/admin/storage/app/public/.gitkeep
 !services/admin/storage/framework/cache/data/.gitkeep
 !services/admin/storage/framework/sessions/.gitkeep
