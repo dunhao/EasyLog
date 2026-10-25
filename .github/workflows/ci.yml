@@ -9,13 +9,16 @@ on:
 
 jobs:
   backend-tests:
-    name: 后端 PHPUnit
+    name: 后端 PHPUnit（PHP ${{ matrix.php }}）
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.2', '8.3']   # 8.3=运行时基线（deploy/docker/Dockerfile），8.2=最低支持版本
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: ${{ matrix.php }}
           coverage: none
       - name: Install dependencies
         working-directory: services/admin

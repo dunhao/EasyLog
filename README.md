@@ -129,7 +129,7 @@ php sdk/agent/easylog-agent start -c easylog-agent.json   # 常驻采集
 
 ## 技术栈
 
-- **后端**: PHP 8.2 + Laravel 12 + Swoole 5 (Octane)
+- **后端**: PHP 8.3 运行时（源码兼容 ≥8.2）+ Laravel 12 + Swoole 5 (Octane)
 - **存储**: Elasticsearch 8 / OpenObserve / Quickwit / SQLite（lite 档，可切换）
 - **消息**: Kafka 3.7（core/full 档；lite 档直写免中间件）
 - **元数据**: MySQL 8 + Redis 7（lite 档 SQLite + file 缓存零依赖）

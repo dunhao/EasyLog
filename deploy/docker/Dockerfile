@@ -1,8 +1,15 @@
 # EasyLog PHP 应用镜像
 # 统一基础镜像，admin/ingestion/query/writer/worker 共用
 # 通过 entrypoint 切换启动角色
+#
+# 基线安全策略：
+# - php:8.3-cli-bookworm 为浮动小版本标签，重建镜像即获取最新安全补丁
+#   （例：2026-10-21 CVE-2026-109618/109619 修复于 8.3.36）；
+# - PHP 8.2 安全支持止于 2026-12-31，故基线取 8.3（源码兼容 ^8.2）；
+# - 定期（至少每月）或收到安全通告时执行 docker build 滚动补丁；
+#   生产建议 pin 具体 patch 版本或 digest 并纳入升级流程。
 
-FROM php:8.2-cli-bookworm
+FROM php:8.3-cli-bookworm
 
 # 系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
