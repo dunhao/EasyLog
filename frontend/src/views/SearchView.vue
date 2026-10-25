@@ -323,7 +323,7 @@ onMounted(fetchTopics);
       >
         <el-table-column label="时间" width="170">
           <template #default="{ row }">
-            {{ String(row.timestamp ?? row._ts ?? row['@timestamp'] ?? '').replace('T', ' ').slice(0, 19) }}
+            {{ String(row.ts ?? row.timestamp ?? row._ts ?? row['@timestamp'] ?? '').replace('T', ' ').slice(0, 19) }}
           </template>
         </el-table-column>
         <el-table-column label="级别" width="80">
@@ -334,7 +334,7 @@ onMounted(fetchTopics);
         </el-table-column>
         <el-table-column label="内容" min-width="500">
           <template #default="{ row }">
-            <span class="hit-message">{{ row.message ?? JSON.stringify(row).slice(0, 200) }}</span>
+            <span class="hit-message">{{ row.msg ?? row.message ?? JSON.stringify(row).slice(0, 200) }}</span>
           </template>
         </el-table-column>
       </el-table>
