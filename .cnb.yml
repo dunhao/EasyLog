@@ -1,0 +1,78 @@
+# EasyLog CI（cnb.cool 云原生构建）
+# ------------------------------------------------------------------
+# push 到 main 触发五条并行流水线：
+#   1. 后端：composer install + phpunit（内存驱动，无需外部服务）
+#   2. 前端：npm ci + vue-tsc 类型检查 + vite 生产构建
+#   3. Go SDK：go vet + go test -race
+#   4. Java SDK：mvn test（JDK 内置 HttpServer，无需真实服务）
+#   5. Agent 采集器：standalone 测试（php -S mock 接入端）
+#
+# 依赖统一走国内镜像源，加速且稳定。
+main:
+  push:
+    # ---------- 1. 后端 PHPUnit ----------
+    - name: backend-tests
+      docker:
+        image: composer:2.7
+      stages:
+        - name: composer-install
+          script:
+            - cd services/admin
+            - composer config -g repos.packagist composer https://mirrors.cloud.tencent.com/composer/
+            - composer install --no-interaction --prefer-dist --no-progress
+        - name: phpunit
+          script:
+            - cd services/admin
+            - php vendor/bin/phpunit
+
+    # ---------- 2. 前端类型检查 + 构建 ----------
+    - name: frontend-build
+      docker:
+        image: node:20
+      stages:
+        - name: npm-ci
+          script:
+            - cd frontend
+            - npm config set registry https://registry.npmmirror.com
+            - npm ci --no-audit --no-fund
+        - name: typecheck-and-build
+          script:
+            - cd frontend
+            - npm run build
+
+    # ---------- 3. Go SDK ----------
+    - name: go-sdk-tests
+      docker:
+        image: golang:1.26
+      stages:
+        - name: go-vet
+          script:
+            - cd sdk/go
+            - go vet ./...
+        - name: go-test
+          script:
+            - cd sdk/go
+            - go test -race ./...
+
+    # ---------- 4. Java SDK ----------
+    - name: java-sdk-tests
+      docker:
+        image: maven:3.9-eclipse-temurin-17
+      stages:
+        - name: mvn-test
+          script:
+            - cd sdk/java
+            - mvn -q -s maven-settings.xml test
+
+    # ---------- 5. Agent 采集器 ----------
+    - name: agent-tests
+      docker:
+        image: php:8.2-cli
+      stages:
+        - name: syntax-check
+          script:
+            - php -l sdk/agent/easylog-agent
+            - php -l sdk/agent/tests/run.php
+        - name: standalone-tests
+          script:
+            - php sdk/agent/tests/run.php

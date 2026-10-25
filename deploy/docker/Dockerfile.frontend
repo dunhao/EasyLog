@@ -1,0 +1,22 @@
+# EasyLog 前端控制台镜像（多阶段构建）
+# 构建期用 node 编译（compose 中配置 network: host 绕 UFW 出网限制），
+# 运行期为纯 nginx 静态服务，不再依赖 node/npm。
+
+FROM node:20-alpine AS build
+
+WORKDIR /app
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY frontend/ .
+RUN npm run build
+
+FROM nginx:1.25-alpine
+
+# API 反代上游（host:port）：lite 档 app:9515 / core 档 query:9515，
+# 由运行环境覆盖；envsubst 渲染模板到 conf.d
+ENV API_UPSTREAM=query:9515
+COPY deploy/docker/nginx-frontend.conf /etc/nginx/templates/default.conf.template
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80

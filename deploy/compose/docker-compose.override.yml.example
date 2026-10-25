@@ -1,0 +1,23 @@
+# 开发覆盖文件示例
+# 复制为 docker-compose.override.yml 后生效
+# 用于：开启 Xdebug、暴露内部端口、挂载本地代码等
+#
+# 示例场景：
+# 1. 暴露 Kafka 容器内部 JMX 端口用于调优
+# 2. 给 PHP 容器加 Xdebug
+# 3. 挂载额外的配置文件
+
+services:
+  admin:
+    environment:
+      XDEBUG_MODE: develop,debug
+      XDEBUG_CONFIG: "client_host=host.docker.internal client_port=9003"
+    volumes:
+      - ../../services/admin:/var/www/html
+      - ./xdebug.ini:/usr/local/etc/php/conf.d/99-xdebug.ini
+
+  kafka:
+    ports:
+      - "9999:9999"   # JMX
+    environment:
+      JMX_PORT: 9999

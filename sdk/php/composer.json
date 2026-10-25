@@ -1,0 +1,42 @@
+{
+    "name": "easylog/sdk-php",
+    "description": "EasyLog PHP SDK - Monolog handler and HTTP client for pushing logs to EasyLog service.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": ["log", "logging", "easylog", "monolog", "saas"],
+    "homepage": "https://github.com/easylog/sdk-php",
+    "support": {
+        "issues": "https://github.com/easylog/sdk-php/issues",
+        "source": "https://github.com/easylog/sdk-php"
+    },
+    "require": {
+        "php": ">=8.1",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "psr/log": "^2.0|^3.0"
+    },
+    "require-dev": {
+        "monolog/monolog": "^2.0|^3.0",
+        "phpunit/phpunit": "^9.0|^10.0"
+    },
+    "suggest": {
+        "monolog/monolog": "For MonologHandler integration (^2.0|^3.0)"
+    },
+    "autoload": {
+        "psr-4": {
+            "EasyLog\\SDK\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "EasyLog\\SDK\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable"
+}

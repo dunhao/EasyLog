@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 告警规则</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<script src="assets/mock.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+  /* ---------- state ---------- */
+  let rules = [];
+  let events = [];
+  let topics = [];
+  let workspaces = [];
+  let currentTab = "rules";
+
+  /* ---------- helpers ---------- */
+  function showToast(message, type) {
+    type = type || "info";
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay show";
+    overlay.style.zIndex = 2000;
+    const color = type === "success" ? "var(--success)" : type === "error" ? "var(--danger)" : "var(--accent-primary)";
+    const icon = type === "success" ? "check-circle" : type === "error" ? "x-circle" : "info";
+    overlay.innerHTML = `
+      <div class="modal" style="max-width: 360px; text-align: center;">
+        <div class="modal-body">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:12px;">
+            <i data-lucide="${icon}" style="width:32px;height:32px;color:${color};"></i>
+            <div style="font-size: var(--text-sm);">${message}</div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    if (window.lucide) lucide.createIcons();
+    setTimeout(function () { overlay.remove(); }, 2000);
+  }
+
+  function ruleName(uuid) { const r = rules.find(function (x) { return x.uuid === uuid; }); return r ? r.name : uuid; }
+  function topicName(uuid) { const t = topics.find(function (x) { return x.uuid === uuid; }); return t ? t.name : "—"; }
+
+  function severityBadge(sev) {
+    const map = { critical: "critical", warning: "warning", info: "info" };
+    return `<span class="badge badge-${map[sev] || "muted"}">${sev}</span>`;
+  }
+  function channelBadges(arr) {
+    const icons = { webhook: "webhook", email: "mail", dingtalk: "bell", wecom: "message-square", slack: "hash" };
+    return arr.map(function (c) {
+      return `<span class="badge badge-muted"><i data-lucide="${icons[c] || "circle"}" style="width:10px;height:10px;"></i>${c}</span>`;
+    }).join(" ");
+  }
+
+  /* ---------- shell render ---------- */
+  function renderShell() {
+    const mainHTML = `
+      <div class="tabs mb-4">
+        <div class="tab ${currentTab === "rules" ? "active" : ""}" onclick="switchTab('rules')">告警规则</div>
+        <div class="tab ${currentTab === "events" ? "active" : ""}" onclick="switchTab('events')">告警事件</div>
+        <div class="tab ${currentTab === "channels" ? "active" : ""}" onclick="switchTab('channels')">通知渠道</div>
+      </div>
+      <div id="tabContent">${renderTabContent()}</div>
+      ${renderCreateModal()}
+    `;
+    const actionsHTML = `
+      <button class="btn btn-primary" onclick="openCreateRule()">
+        <i data-lucide="plus"></i> 新建规则
+      </button>`;
+    EasyLogUI.render({
+      activeNavKey: "alerts",
+      pageTitle: "告警规则",
+      breadcrumbHTML: '<a href="workspaces.html">工作空间</a><span class="breadcrumb-sep">/</span>Acme 生产<span class="breadcrumb-sep">/</span>告警规则',
+      actionsHTML: actionsHTML,
+      mainHTML: mainHTML
+    });
+  }
+
+  function renderTabContent() {
+    if (currentTab === "rules") return renderRulesTab();
+    if (currentTab === "events") return renderEventsTab();
+    if (currentTab === "channels") return renderChannelsTab();
+    return "";
+  }
+
+  /* ---------- rules tab ---------- */
+  function renderRulesTab() {
+    return `
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex gap-2 items-center">
+          <select class="form-select" id="rule_status_filter" style="height:32px;width:160px;" onchange="renderRulesTable()">
+            <option value="all">全部状态</option>
+            <option value="active">运行中</option>
+            <option value="paused">已暂停</option>
+          </select>
+        </div>
+      </div>
+      <div class="table-wrap" id="rulesTableWrap">${renderRulesTable()}</div>
+    `;
+  }
+
+  function renderRulesTable() {
+    const filterEl = document.getElementById("rule_status_filter");
+    const filter = filterEl ? filterEl.value : "all";
+    const filtered = filter === "all" ? rules : rules.filter(function (r) { return r.status === filter; });
+    const html = `
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>规则名</th>
+            <th>所属主题</th>
+            <th>条件</th>
+            <th>严重级别</th>
+            <th>通知渠道</th>
+            <th>状态</th>
+            <th>最近触发</th>
+            <th>24h 触发</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered.map(function (r) {
+            return `
+              <tr>
+                <td>${r.name}</td>
+                <td>${topicName(r.topic_uuid)}</td>
+                <td><span class="cell-mono">${r.condition}</span></td>
+                <td>${severityBadge(r.severity)}</td>
+                <td>${channelBadges(r.notify_channels)}</td>
+                <td>${EasyLogUI.statusBadge(r.status)}</td>
+                <td class="cell-muted">${r.last_fired || "—"}</td>
+                <td>${r.fired_count_24h}</td>
+                <td class="cell-muted">${r.created_at}</td>
+                <td>
+                  <button class="btn btn-sm btn-ghost" onclick="editRule('${r.uuid}')" title="编辑"><i data-lucide="pencil" style="width:12px;height:12px;"></i></button>
+                  <button class="btn btn-sm btn-ghost" onclick="toggleRule('${r.uuid}')" title="${r.status === "active" ? "暂停" : "启用"}"><i data-lucide="${r.status === "active" ? "pause" : "play"}" style="width:12px;height:12px;"></i></button>
+                  <button class="btn btn-sm btn-ghost" onclick="deleteRule('${r.uuid}')" title="删除"><i data-lucide="trash-2" style="width:12px;height:12px;"></i></button>
+                </td>
+              </tr>`;
+          }).join("")}
+        </tbody>
+      </table>`;
+    const wrap = document.getElementById("rulesTableWrap");
+    if (wrap) { wrap.innerHTML = html; if (window.lucide) lucide.createIcons(); }
+    return html;
+  }
+
+  /* ---------- events tab ---------- */
+  function renderEventsTab() {
+    return `
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>触发时间</th>
+              <th>规则名</th>
+              <th>严重级别</th>
+              <th>上下文</th>
+              <th>通知状态</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${events.map(function (e) {
+              return `
+                <tr>
+                  <td class="cell-muted">${e.fired_at}</td>
+                  <td>${ruleName(e.rule_uuid)}</td>
+                  <td>${severityBadge(e.severity)}</td>
+                  <td>${e.context}</td>
+                  <td>${e.notify_status === "sent" ? '<span class="badge badge-success">已发送</span>' : '<span class="badge badge-muted">未发送</span>'}</td>
+                  <td>${e.resolved_at ? '<span class="badge badge-success">已恢复</span>' : '<span class="badge badge-danger">活跃</span>'}</td>
+                  <td>
+                    <button class="btn btn-sm btn-ghost" onclick="viewEvent('${e.uuid}')" title="查看详情"><i data-lucide="eye" style="width:12px;height:12px;"></i></button>
+                    ${!e.resolved_at ? `<button class="btn btn-sm btn-secondary" onclick="resolveEvent('${e.uuid}')">手动恢复</button>` : ""}
+                  </td>
+                </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  /* ---------- channels tab ---------- */
+  function renderChannelsTab() {
+    const channels = [
+      { type: "webhook", name: "Webhook", icon: "webhook", desc: "通用 HTTP 回调", config: { url: "https://hooks.example.com/alert" }, status: "active" },
+      { type: "email", name: "邮件", icon: "mail", desc: "SMTP 邮件通知", config: { smtp: "smtp.example.com:465", recipients: 12 }, status: "active" },
+      { type: "dingtalk", name: "钉钉机器人", icon: "bell", desc: "钉钉群机器人", config: { webhook: "https://oapi.dingtalk.com/robot/send?access_token=***" }, status: "active" },
+      { type: "wecom", name: "企业微信机器人", icon: "message-square", desc: "企业微信群机器人", config: { webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=***" }, status: "active" }
+    ];
+    return `
+      <div class="grid grid-cols-2">
+        ${channels.map(function (c) {
+          return `
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <div class="card-title"><i data-lucide="${c.icon}" style="width:14px;height:14px;display:inline-block;margin-right:6px;vertical-align:middle;"></i>${c.name}</div>
+                  <div class="card-subtitle">${c.desc}</div>
+                </div>
+                ${EasyLogUI.statusBadge(c.status)}
+              </div>
+              <div class="code-block mb-3">${Object.keys(c.config).map(function (k) { return k + ": " + c.config[k]; }).join("\n")}</div>
+              <div class="flex gap-2">
+                <button class="btn btn-sm btn-secondary" onclick="showToast('编辑 ${c.name}（原型仅展示）', 'info')"><i data-lucide="pencil" style="width:12px;height:12px;"></i>编辑</button>
+                <button class="btn btn-sm btn-ghost" onclick="showToast('测试 ${c.name} 发送（原型仅展示）', 'info')"><i data-lucide="send" style="width:12px;height:12px;"></i>测试</button>
+              </div>
+            </div>`;
+        }).join("")}
+      </div>`;
+  }
+
+  /* ---------- tab switching ---------- */
+  function switchTab(tab) { currentTab = tab; renderShell(); }
+
+  /* ---------- rule actions ---------- */
+  function editRule(uuid) { showToast("编辑规则（原型仅展示）", "info"); }
+  function toggleRule(uuid) {
+    const r = rules.find(function (x) { return x.uuid === uuid; });
+    if (!r) return;
+    r.status = r.status === "active" ? "paused" : "active";
+    renderShell();
+    showToast("规则状态已切换", "success");
+  }
+  function deleteRule(uuid) {
+    const r = rules.find(function (x) { return x.uuid === uuid; });
+    if (!r) return;
+    if (confirm("确认删除规则 [" + r.name + "]？")) {
+      rules = rules.filter(function (x) { return x.uuid !== uuid; });
+      renderShell();
+      showToast("已删除", "success");
+    }
+  }
+
+  /* ---------- event actions ---------- */
+  function viewEvent(uuid) { showToast("查看事件详情（原型仅展示）", "info"); }
+  function resolveEvent(uuid) {
+    const e = events.find(function (x) { return x.uuid === uuid; });
+    if (!e) return;
+    e.resolved_at = new Date().toISOString().replace("T", " ").slice(0, 19);
+    renderShell();
+    showToast("事件已手动恢复", "success");
+  }
+
+  /* ---------- create modal ---------- */
+  function openCreateRule() { document.getElementById("ruleModal").classList.add("show"); }
+  function closeCreateRule() { document.getElementById("ruleModal").classList.remove("show"); }
+
+  function renderCreateModal() {
+    return `
+      <div class="modal-overlay" id="ruleModal">
+        <div class="modal modal-lg">
+          <div class="modal-header">
+            <div class="modal-title">新建告警规则</div>
+            <button class="modal-close" onclick="closeCreateRule()"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="grid grid-cols-2">
+              <div class="form-row">
+                <label class="form-label">规则名称<span class="req">*</span></label>
+                <input class="form-input" id="ar_name" placeholder="例: ERROR 日志激增" />
+              </div>
+              <div class="form-row">
+                <label class="form-label">工作空间</label>
+                <select class="form-select" id="ar_workspace">
+                  ${workspaces.map(function (w) { return `<option value="${w.uuid}">${w.name}</option>`; }).join("")}
+                </select>
+              </div>
+              <div class="form-row">
+                <label class="form-label">主题</label>
+                <select class="form-select" id="ar_topic">
+                  ${topics.map(function (t) { return `<option value="${t.uuid}">${t.name}</option>`; }).join("")}
+                </select>
+              </div>
+              <div class="form-row">
+                <label class="form-label">严重级别</label>
+                <select class="form-select" id="ar_severity">
+                  <option value="critical">critical</option>
+                  <option value="warning">warning</option>
+                  <option value="info">info</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">查询条件<span class="req">*</span></label>
+              <input class="form-input" id="ar_condition" style="font-family: var(--font-mono);" placeholder="level:ERROR" value="level:ERROR" />
+              <div class="form-hint">支持 key:value 形式，多个用 AND 连接，如 level:ERROR AND service:order-service</div>
+            </div>
+            <div class="grid grid-cols-2">
+              <div class="form-row">
+                <label class="form-label">时间窗口</label>
+                <select class="form-select" id="ar_window">
+                  <option value="1min">1 分钟</option>
+                  <option value="5min" selected>5 分钟</option>
+                  <option value="10min">10 分钟</option>
+                  <option value="1h">1 小时</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label class="form-label">阈值（次数）</label>
+                <input class="form-input" id="ar_threshold" type="number" value="100" />
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">通知渠道（多选）</label>
+              <div class="flex gap-3" style="flex-wrap: wrap;">
+                ${["webhook", "email", "dingtalk", "wecom", "slack"].map(function (c) {
+                  return `
+                    <label class="flex items-center gap-1" style="font-size: var(--text-sm); color: var(--text-primary);">
+                      <input type="checkbox" name="ar_channels" value="${c}" ${c === "webhook" ? "checked" : ""} />
+                      ${c}
+                    </label>`;
+                }).join("")}
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">状态</label>
+              <select class="form-select" id="ar_status">
+                <option value="active">启用</option>
+                <option value="paused">暂停</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeCreateRule()">取消</button>
+            <button class="btn btn-primary" onclick="createRule()"><i data-lucide="check"></i> 创建</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function createRule() {
+    const name = document.getElementById("ar_name").value || "未命名规则";
+    const workspace_uuid = document.getElementById("ar_workspace").value;
+    const topic_uuid = document.getElementById("ar_topic").value;
+    const condition = document.getElementById("ar_condition").value || "level:ERROR";
+    const windowVal = document.getElementById("ar_window").value;
+    const threshold = +document.getElementById("ar_threshold").value || 100;
+    const severity = document.getElementById("ar_severity").value;
+    const channels = Array.prototype.slice.call(document.querySelectorAll("input[name=ar_channels]:checked")).map(function (c) { return c.value; });
+    const status = document.getElementById("ar_status").value === "active" ? "active" : "paused";
+    rules.unshift({
+      uuid: "al_new_" + Math.random().toString(36).slice(2, 8),
+      workspace_uuid: workspace_uuid,
+      topic_uuid: topic_uuid,
+      name: name,
+      condition: condition + " count > " + threshold + "/" + windowVal,
+      severity: severity,
+      notify_channels: channels.length ? channels : ["webhook"],
+      status: status,
+      last_fired: null,
+      fired_count_24h: 0,
+      created_at: new Date().toISOString().slice(0, 10)
+    });
+    closeCreateRule();
+    renderShell();
+    showToast("规则已创建", "success");
+  }
+
+  /* ---------- boot ---------- */
+  (async function () {
+    rules = await MockAPI.listAlertRules();
+    events = await MockAPI.listAlertEvents();
+    topics = await MockAPI.listTopics();
+    workspaces = await MockAPI.listWorkspaces();
+    renderShell();
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+// CSS 变量统一入口：以 Element Plus 设计令牌为底，扩展业务语义色
+:root {
+  // 品牌色
+  --easylog-primary: #4f6df5;
+  --easylog-success: #52c41a;
+  --easylog-warning: #faad14;
+  --easylog-danger:  #f5222d;
+
+  // 日志级别颜色（与原型 design-contract 保持一致）
+  --easylog-level-debug: #909399;
+  --easylog-level-info:  #67c23a;
+  --easylog-level-warn:  #e6a23c;
+  --easylog-level-error: #f56c6c;
+  --easylog-level-fatal: #b71c1c;
+  --easylog-level-trace: #909399;
+}
+
+// 日志级别标签类（供 LogTable 等组件复用）
+.lvl {
+  display: inline-block;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 3px;
+  color: #fff;
+  font-family: 'JetBrains Mono', 'Menlo', monospace;
+}
+.lvl-DEBUG { background: var(--easylog-level-debug); }
+.lvl-INFO  { background: var(--easylog-level-info); }
+.lvl-WARN  { background: var(--easylog-level-warn); }
+.lvl-ERROR { background: var(--easylog-level-error); }
+.lvl-FATAL { background: var(--easylog-level-fatal); }
+.lvl-TRACE { background: var(--easylog-level-trace); }

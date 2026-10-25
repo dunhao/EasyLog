@@ -1,0 +1,16 @@
+# K8s 部署清单将在 v0.2 提供
+# 计划包含：
+# - namespace.yaml
+# - configmap.yaml
+# - secret.yaml
+# - mysql-statefulset.yaml (or 使用云托管)
+# - redis-statefulset.yaml
+# - elasticsearch-statefulset.yaml
+# - kafka-statefulset.yaml
+# - admin-deployment.yaml
+# - ingestion-deployment.yaml
+# - query-deployment.yaml
+# - writer-deployment.yaml
+# - worker-deployment.yaml
+# - ingress.yaml
+# - hpa.yaml

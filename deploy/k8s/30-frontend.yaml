@@ -1,0 +1,40 @@
+# 前端控制台（nginx 静态 + /api 反代到 easylog-query）
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: easylog-frontend
+  namespace: easylog
+  labels: { app: easylog-frontend }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: easylog-frontend }
+  template:
+    metadata:
+      labels: { app: easylog-frontend }
+    spec:
+      containers:
+        - name: frontend
+          image: easylog/frontend:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: easylog-frontend
+  namespace: easylog
+spec:
+  selector: { app: easylog-frontend }
+  ports:
+    - port: 80
+      targetPort: 80

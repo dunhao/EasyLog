@@ -1,0 +1,85 @@
+# EasyLog CI（GitHub Actions，与 .cnb.yml 等价的五条并行流水线）
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    name: 后端 PHPUnit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+      - name: Install dependencies
+        working-directory: services/admin
+        run: composer install --no-interaction --prefer-dist --no-progress
+      - name: Run tests
+        working-directory: services/admin
+        run: php vendor/bin/phpunit
+
+  frontend-build:
+    name: 前端类型检查与构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Type check & build
+        working-directory: frontend
+        run: npm run build
+
+  go-sdk-tests:
+    name: Go SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Vet
+        working-directory: sdk/go
+        run: go vet ./...
+      - name: Test
+        working-directory: sdk/go
+        run: go test -race ./...
+
+  java-sdk-tests:
+    name: Java SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Test
+        working-directory: sdk/java
+        run: mvn -q -B test
+
+  agent-tests:
+    name: Agent 采集器
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+      - name: Syntax check
+        run: |
+          php -l sdk/agent/easylog-agent
+          php -l sdk/agent/tests/run.php
+      - name: Standalone tests
+        run: php sdk/agent/tests/run.php

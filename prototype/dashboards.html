@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 仪表盘库</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<script src="assets/mock.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+  /* ---------- state ---------- */
+  let dashboards = [];
+  let currentView = "cards";
+  let previewCharts = [];
+
+  /* ---------- helpers ---------- */
+  function showToast(message, type) {
+    type = type || "info";
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay show";
+    overlay.style.zIndex = 2000;
+    const color = type === "success" ? "var(--success)" : type === "error" ? "var(--danger)" : "var(--accent-primary)";
+    const icon = type === "success" ? "check-circle" : type === "error" ? "x-circle" : "info";
+    overlay.innerHTML = `
+      <div class="modal" style="max-width: 360px; text-align: center;">
+        <div class="modal-body">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:12px;">
+            <i data-lucide="${icon}" style="width:32px;height:32px;color:${color};"></i>
+            <div style="font-size: var(--text-sm);">${message}</div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    if (window.lucide) lucide.createIcons();
+    setTimeout(function () { overlay.remove(); }, 2000);
+  }
+
+  /* ---------- shell render ---------- */
+  function renderShell() {
+    const mainHTML = `
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex gap-1" style="background: var(--bg-elevated); padding: 2px; border-radius: var(--radius-md); border: 1px solid var(--border-base);">
+          <button class="btn btn-sm ${currentView === "cards" ? "btn-primary" : "btn-ghost"}" onclick="switchView('cards')"><i data-lucide="grid-3x3" style="width:12px;height:12px;"></i>卡片</button>
+          <button class="btn btn-sm ${currentView === "table" ? "btn-primary" : "btn-ghost"}" onclick="switchView('table')"><i data-lucide="list" style="width:12px;height:12px;"></i>表格</button>
+        </div>
+      </div>
+      <div id="dashboardsView">${renderView()}</div>
+      ${renderPreviewModal()}
+    `;
+    const actionsHTML = `
+      <button class="btn btn-primary" onclick="showToast('新建仪表盘（原型仅展示）', 'info')">
+        <i data-lucide="plus"></i> 新建仪表盘
+      </button>`;
+    EasyLogUI.render({
+      activeNavKey: "dashboards",
+      pageTitle: "仪表盘库",
+      breadcrumbHTML: '<a href="workspaces.html">工作空间</a><span class="breadcrumb-sep">/</span>Acme 生产<span class="breadcrumb-sep">/</span>仪表盘库',
+      actionsHTML: actionsHTML,
+      mainHTML: mainHTML
+    });
+  }
+
+  function renderView() {
+    if (currentView === "cards") return renderCardsView();
+    return renderTableView();
+  }
+
+  function renderCardsView() {
+    return `
+      <div class="grid grid-cols-3">
+        ${dashboards.map(function (d) {
+          return `
+            <div class="card">
+              <div class="card-header">
+                <div class="card-title">${d.name}</div>
+                <span class="badge badge-info">${d.charts} 图表</span>
+              </div>
+              <div class="text-xs text-muted mb-3">
+                <div>创建者: ${d.created_by}</div>
+                <div>更新时间: ${d.updated_at}</div>
+                <div>创建时间: ${d.created_at}</div>
+              </div>
+              <div class="flex gap-2">
+                <button class="btn btn-sm btn-primary" onclick="previewDashboard('${d.uuid}')"><i data-lucide="eye" style="width:12px;height:12px;"></i>预览</button>
+                <button class="btn btn-sm btn-secondary" onclick="showToast('编辑 ${d.name}（原型仅展示）', 'info')"><i data-lucide="pencil" style="width:12px;height:12px;"></i>编辑</button>
+                <button class="btn btn-sm btn-ghost" onclick="deleteDashboard('${d.uuid}')" title="删除"><i data-lucide="trash-2" style="width:12px;height:12px;"></i></button>
+              </div>
+            </div>`;
+        }).join("")}
+      </div>`;
+  }
+
+  function renderTableView() {
+    return `
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>仪表盘名</th>
+              <th>图表数</th>
+              <th>创建者</th>
+              <th>创建时间</th>
+              <th>更新时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${dashboards.map(function (d) {
+              return `
+                <tr>
+                  <td>${d.name}</td>
+                  <td>${d.charts}</td>
+                  <td>${d.created_by}</td>
+                  <td class="cell-muted">${d.created_at}</td>
+                  <td class="cell-muted">${d.updated_at}</td>
+                  <td>
+                    <button class="btn btn-sm btn-primary" onclick="previewDashboard('${d.uuid}')"><i data-lucide="eye" style="width:12px;height:12px;"></i>预览</button>
+                    <button class="btn btn-sm btn-secondary" onclick="showToast('编辑（原型仅展示）', 'info')"><i data-lucide="pencil" style="width:12px;height:12px;"></i>编辑</button>
+                    <button class="btn btn-sm btn-ghost" onclick="deleteDashboard('${d.uuid}')" title="删除"><i data-lucide="trash-2" style="width:12px;height:12px;"></i></button>
+                  </td>
+                </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  function switchView(view) {
+    currentView = view;
+    renderShell();
+  }
+
+  function deleteDashboard(uuid) {
+    const d = dashboards.find(function (x) { return x.uuid === uuid; });
+    if (!d) return;
+    if (confirm("确认删除仪表盘 [" + d.name + "]？")) {
+      dashboards = dashboards.filter(function (x) { return x.uuid !== uuid; });
+      renderShell();
+      showToast("已删除", "success");
+    }
+  }
+
+  /* ---------- preview modal ---------- */
+  function renderPreviewModal() {
+    return `
+      <div class="modal-overlay" id="previewModal">
+        <div class="modal modal-xl" style="max-width: 1400px; width: 96vw; height: 92vh; max-height: 92vh; display: flex; flex-direction: column;">
+          <div class="modal-header">
+            <div class="modal-title" id="previewTitle">仪表盘预览</div>
+            <div class="flex items-center gap-3">
+              <select class="form-select" id="preview_time_range" style="width: 140px;">
+                <option value="15min">近 15 分钟</option>
+                <option value="1h" selected>近 1 小时</option>
+                <option value="6h">近 6 小时</option>
+                <option value="24h">近 24 小时</option>
+                <option value="7d">近 7 天</option>
+              </select>
+              <button class="btn btn-sm btn-secondary" onclick="refreshPreview()"><i data-lucide="refresh-cw" style="width:12px;height:12px;"></i>刷新</button>
+              <button class="btn btn-sm btn-secondary" onclick="showToast('编辑（原型仅展示）', 'info')"><i data-lucide="pencil" style="width:12px;height:12px;"></i>编辑</button>
+              <button class="modal-close" onclick="closePreview()"><i data-lucide="x"></i></button>
+            </div>
+          </div>
+          <div class="modal-body" style="flex: 1; overflow-y: auto;">
+            <div class="grid grid-cols-2" id="previewCharts">
+              <div class="card">
+                <div class="card-header"><div class="card-title">订单错误率趋势</div></div>
+                <div id="chart_line" style="width: 100%; height: 240px;"></div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div class="card-title">按服务分类的 ERROR 数</div></div>
+                <div id="chart_bar" style="width: 100%; height: 240px;"></div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div class="card-title">HTTP 状态码分布</div></div>
+                <div id="chart_pie" style="width: 100%; height: 240px;"></div>
+              </div>
+              <div class="card">
+                <div class="card-header"><div class="card-title">请求延迟 P95</div></div>
+                <div id="chart_area" style="width: 100%; height: 240px;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function previewDashboard(uuid) {
+    const d = dashboards.find(function (x) { return x.uuid === uuid; });
+    if (!d) return;
+    document.getElementById("previewModal").classList.add("show");
+    document.getElementById("previewTitle").textContent = d.name;
+    previewCharts.forEach(function (c) { try { c.dispose(); } catch (e) {} });
+    previewCharts = [];
+    setTimeout(renderPreviewCharts, 60);
+  }
+
+  function renderPreviewCharts() {
+    if (typeof echarts === "undefined") { setTimeout(renderPreviewCharts, 100); return; }
+    const lineDom = document.getElementById("chart_line");
+    const barDom = document.getElementById("chart_bar");
+    const pieDom = document.getElementById("chart_pie");
+    const areaDom = document.getElementById("chart_area");
+    if (!lineDom || !barDom || !pieDom || !areaDom) return;
+    if (lineDom.offsetWidth === 0) { setTimeout(renderPreviewCharts, 80); return; }
+
+    /* line chart: error rate trend */
+    const lineChart = echarts.init(lineDom);
+    lineChart.setOption(Object.assign(EasyLogCharts.defaultOpts(), {
+      grid: { top: 24, left: 40, right: 16, bottom: 28 },
+      tooltip: { trigger: "axis" },
+      xAxis: { type: "category", data: ["00", "04", "08", "12", "16", "20"], axisLine: { lineStyle: { color: "#2F3548" } }, axisLabel: { color: "#6B7180", fontSize: 10 }, axisTick: { show: false } },
+      yAxis: { type: "value", name: "%", nameTextStyle: { color: "#6B7180", fontSize: 10 }, axisLine: { show: false }, axisLabel: { color: "#6B7180", fontSize: 10, formatter: "{value}%" }, splitLine: { lineStyle: { color: "#1A1F2C" } } },
+      series: [{
+        name: "错误率", type: "line", smooth: true, showSymbol: false,
+        data: [0.4, 0.6, 1.2, 2.1, 1.8, 0.9],
+        lineStyle: { color: "#F5455C", width: 2 }, itemStyle: { color: "#F5455C" },
+        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: "rgba(245,69,92,0.35)" },
+          { offset: 1, color: "rgba(245,69,92,0.02)" }
+        ]) }
+      }]
+    }));
+    previewCharts.push(lineChart);
+
+    /* bar chart: ERROR by service */
+    const barChart = echarts.init(barDom);
+    barChart.setOption(Object.assign(EasyLogCharts.defaultOpts(), {
+      grid: { top: 16, left: 130, right: 24, bottom: 16 },
+      xAxis: { type: "value", axisLine: { show: false }, axisLabel: { color: "#6B7180", fontSize: 10 }, splitLine: { lineStyle: { color: "#1A1F2C" } } },
+      yAxis: { type: "category", data: ["order-service", "payment-service", "inventory-service", "notification-service", "cart-service"], axisLine: { show: false }, axisLabel: { color: "#9CA3B0", fontSize: 11 }, axisTick: { show: false }, inverse: true },
+      series: [{
+        type: "bar", data: [312, 198, 86, 42, 18], barWidth: 12,
+        itemStyle: { color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+          { offset: 0, color: "#4F7CFF" },
+          { offset: 1, color: "#6B91FF" }
+        ]), borderRadius: [0, 3, 3, 0] },
+        label: { show: true, position: "right", color: "#9CA3B0", fontSize: 10 }
+      }]
+    }));
+    previewCharts.push(barChart);
+
+    /* pie chart: HTTP status code distribution */
+    const pieChart = echarts.init(pieDom);
+    pieChart.setOption({
+      tooltip: { trigger: "item", backgroundColor: "#1A1F2C", borderColor: "#2F3548", textStyle: { color: "#E4E7EF" } },
+      legend: { orient: "vertical", right: 0, top: "center", textStyle: { color: "#9CA3B0", fontSize: 11 } },
+      series: [{
+        type: "pie", radius: ["50%", "78%"], center: ["40%", "50%"], avoidLabelOverlap: false,
+        itemStyle: { borderColor: "#11151F", borderWidth: 2 }, label: { show: false },
+        data: [
+          { name: "2xx", value: 580000, itemStyle: { color: "#2EBA68" } },
+          { name: "3xx", value: 12000, itemStyle: { color: "#4F7CFF" } },
+          { name: "4xx", value: 8400, itemStyle: { color: "#F5A623" } },
+          { name: "5xx", value: 2300, itemStyle: { color: "#F5455C" } }
+        ]
+      }]
+    });
+    previewCharts.push(pieChart);
+
+    /* area chart: P95 latency */
+    const areaChart = echarts.init(areaDom);
+    areaChart.setOption(Object.assign(EasyLogCharts.defaultOpts(), {
+      grid: { top: 24, left: 40, right: 16, bottom: 28 },
+      tooltip: { trigger: "axis" },
+      xAxis: { type: "category", data: ["00", "04", "08", "12", "16", "20"], axisLine: { lineStyle: { color: "#2F3548" } }, axisLabel: { color: "#6B7180", fontSize: 10 }, axisTick: { show: false } },
+      yAxis: { type: "value", name: "ms", nameTextStyle: { color: "#6B7180", fontSize: 10 }, axisLine: { show: false }, axisLabel: { color: "#6B7180", fontSize: 10 }, splitLine: { lineStyle: { color: "#1A1F2C" } } },
+      series: [{
+        name: "P95 延迟", type: "line", smooth: true, showSymbol: false,
+        data: [120, 180, 240, 320, 280, 200],
+        lineStyle: { color: "#A625FF", width: 2 }, itemStyle: { color: "#A625FF" },
+        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: "rgba(166,37,255,0.35)" },
+          { offset: 1, color: "rgba(166,37,255,0.02)" }
+        ]) }
+      }]
+    }));
+    previewCharts.push(areaChart);
+
+    window.addEventListener("resize", function () { previewCharts.forEach(function (c) { try { c.resize(); } catch (e) {} }); });
+  }
+
+  function refreshPreview() {
+    showToast("已刷新", "success");
+    renderPreviewCharts();
+  }
+
+  function closePreview() {
+    document.getElementById("previewModal").classList.remove("show");
+    previewCharts.forEach(function (c) { try { c.dispose(); } catch (e) {} });
+    previewCharts = [];
+  }
+
+  /* ---------- boot ---------- */
+  (async function () {
+    dashboards = await MockAPI.listDashboards();
+    renderShell();
+  })();
+</script>
+</body>
+</html>

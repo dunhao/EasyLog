@@ -1,0 +1,40 @@
+# 镜像构建上下文排除项（build context 为仓库根目录）
+#
+# 背景：deploy/docker/Dockerfile 会 COPY services/admin 进镜像。若不做排除，
+# 本地的 vendor / 日志 / 缓存 / 密钥文件会被一并打进镜像层，既撑大体积，
+# 又可能把开发机的 .env 与凭据带进生产镜像。
+
+.git
+.github
+.codegraph
+.workbuddy
+.DS_Store
+**/.DS_Store
+
+# 依赖目录：由镜像内的 composer install / npm ci 生成，不复制本地产物
+**/node_modules
+services/admin/vendor
+sdk/php/vendor
+
+# 运行期产物与缓存
+services/admin/storage/logs/*
+services/admin/storage/framework/cache/data/*
+services/admin/storage/framework/sessions/*
+services/admin/storage/framework/views/*
+services/admin/bootstrap/cache/*.php
+services/admin/.phpunit.cache
+services/admin/coverage
+coverage/
+
+# 环境与密钥：绝不能进镜像，应由 ConfigMap / Secret / 环境变量注入
+services/admin/.env
+services/admin/.env.*
+!services/admin/.env.example
+.env
+.env.*
+!.env.example
+auth.json
+
+# 日志与临时文件
+*.log
+*.sqlite

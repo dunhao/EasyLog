@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 日志主题</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<script src="assets/mock.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+function showToast(msg, type) {
+  type = type || 'success';
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay show';
+  overlay.style.alignItems = 'flex-start';
+  overlay.style.paddingTop = '80px';
+  overlay.style.pointerEvents = 'none';
+  overlay.style.background = 'transparent';
+  overlay.style.backdropFilter = 'none';
+  var color = type === 'success' ? 'var(--success)' : 'var(--danger)';
+  var icon = type === 'success' ? 'check-circle' : 'alert-circle';
+  overlay.innerHTML =
+    '<div style="background:var(--bg-elevated);border:1px solid ' + color + ';border-radius:var(--radius-md);padding:12px 20px;box-shadow:var(--shadow-md);display:flex;align-items:center;gap:10px;font-size:var(--text-sm);">' +
+      '<i data-lucide="' + icon + '" style="color:' + color + ';width:18px;height:18px;"></i>' +
+      '<span>' + msg + '</span>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  lucide.createIcons();
+  setTimeout(function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 2000);
+}
+
+EasyLogUI.render({
+  activeNavKey: 'topics',
+  pageTitle: '日志主题',
+  breadcrumbHTML: '<a href="index.html">EasyLog</a><span class="breadcrumb-sep">/</span><span>日志管理</span><span class="breadcrumb-sep">/</span><span>日志主题</span>',
+  actionsHTML: '<button class="btn btn-primary btn-sm" id="btn-new-tpc"><i data-lucide="plus"></i>新建主题</button>',
+  mainHTML:
+    '<div class="grid grid-cols-4 mb-5">' +
+      '<div class="stat-card"><div class="stat-label">主题总数</div><div class="stat-value" id="stat-total">—</div></div>' +
+      '<div class="stat-card"><div class="stat-label">今日总写入</div><div class="stat-value" id="stat-ingest">—</div></div>' +
+      '<div class="stat-card"><div class="stat-label">总存储</div><div class="stat-value" id="stat-storage">—</div></div>' +
+      '<div class="stat-card"><div class="stat-label">活跃主题</div><div class="stat-value" id="stat-active">—</div></div>' +
+    '</div>' +
+    '<div class="flex items-center justify-between mb-3 gap-3">' +
+      '<div class="flex gap-2 flex-1">' +
+        '<div class="global-search" style="max-width:280px;">' +
+          '<i data-lucide="search"></i>' +
+          '<input type="text" id="tpc-search" placeholder="搜索主题名称或描述..." />' +
+        '</div>' +
+        '<select class="form-select" id="tpc-ws-filter" style="width:200px;height:32px;">' +
+          '<option value="">全部工作空间</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="text-xs text-muted" id="tpc-count">共 0 个主题</div>' +
+    '</div>' +
+    '<div class="table-wrap"><table class="tbl">' +
+      '<thead><tr>' +
+        '<th>主题名</th><th>所属工作空间</th><th>描述</th><th>今日写入量</th><th>存储 GB</th><th>字段数</th><th>保留天数</th><th>状态</th><th>操作</th>' +
+      '</tr></thead>' +
+      '<tbody id="tpc-table-body"><tr><td colspan="9" class="cell-muted" style="text-align:center;padding:24px;">加载中...</td></tr></tbody>' +
+    '</table></div>' +
+    '<div class="modal-overlay" id="fields-modal">' +
+      '<div class="modal modal-lg">' +
+        '<div class="modal-header">' +
+          '<div><div class="modal-title" id="fields-modal-title">字段配置</div><div class="text-xs text-muted">主题字段索引与分析器配置</div></div>' +
+          '<button class="modal-close" id="fields-modal-close"><i data-lucide="x"></i></button>' +
+        '</div>' +
+        '<div class="modal-body">' +
+          '<div class="table-wrap"><table class="tbl">' +
+            '<thead><tr><th>字段名</th><th>类型</th><th>已索引</th><th>分析器</th></tr></thead>' +
+            '<tbody id="fields-table-body"><tr><td colspan="4" class="cell-muted" style="text-align:center;padding:24px;">加载中...</td></tr></tbody>' +
+          '</table></div>' +
+        '</div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-secondary" id="fields-close-btn">关闭</button>' +
+          '<button class="btn btn-primary" id="fields-add-btn"><i data-lucide="plus"></i>新增字段</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>'
+});
+
+var allTopics = [];
+var wsMap = {};
+
+function renderTable() {
+  var q = document.getElementById('tpc-search').value.trim().toLowerCase();
+  var wsFilter = document.getElementById('tpc-ws-filter').value;
+  var filtered = allTopics.filter(function (t) {
+    if (wsFilter && t.workspace_uuid !== wsFilter) return false;
+    if (q && t.name.toLowerCase().indexOf(q) < 0 && t.description.toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  });
+  filtered.sort(function (a, b) { return b.ingest_count_today - a.ingest_count_today; });
+  document.getElementById('tpc-count').textContent = '共 ' + filtered.length + ' 个主题';
+  var body = document.getElementById('tpc-table-body');
+  if (!filtered.length) {
+    body.innerHTML = '<tr><td colspan="9" class="cell-muted" style="text-align:center;padding:24px;">无匹配主题</td></tr>';
+    return;
+  }
+  body.innerHTML = filtered.map(function (t) {
+    return '<tr>' +
+      '<td class="cell-mono"><a href="search.html?topic=' + t.uuid + '">' + t.name + '</a><div class="text-xs text-muted cell-mono">' + t.uuid + '</div></td>' +
+      '<td>' + (wsMap[t.workspace_uuid] || '—') + '</td>' +
+      '<td class="cell-truncate">' + t.description + '</td>' +
+      '<td class="cell-mono">' + EasyLogUI.formatNumber(t.ingest_count_today) + '</td>' +
+      '<td class="cell-mono">' + t.storage_gb + '</td>' +
+      '<td>' + t.fields_count + '</td>' +
+      '<td>' + t.retention_days + ' 天</td>' +
+      '<td>' + EasyLogUI.statusBadge(t.status) + '</td>' +
+      '<td><div class="flex gap-1">' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" title="详情" onclick="location.href=\'search.html\'"><i data-lucide="eye"></i></button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" title="编辑" onclick="showToast(\'编辑功能（原型未实现）\')"><i data-lucide="pencil"></i></button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" title="字段配置" onclick="openFieldsModal(\'' + t.uuid + '\',\'' + t.name.replace(/'/g, "\\'") + '\')"><i data-lucide="list"></i></button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" title="删除" onclick="showToast(\'已删除（原型模拟）\')"><i data-lucide="trash-2"></i></button>' +
+      '</div></td>' +
+    '</tr>';
+  }).join('');
+  lucide.createIcons();
+}
+
+function updateStats() {
+  var total = allTopics.length;
+  var ingestSum = allTopics.reduce(function (s, t) { return s + t.ingest_count_today; }, 0);
+  var storageSum = allTopics.reduce(function (s, t) { return s + t.storage_gb; }, 0);
+  var activeCount = allTopics.filter(function (t) { return t.status === 'active'; }).length;
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-ingest').textContent = EasyLogUI.formatNumber(ingestSum);
+  document.getElementById('stat-storage').textContent = storageSum.toFixed(1) + ' GB';
+  document.getElementById('stat-active').textContent = activeCount;
+}
+
+function openFieldsModal(uuid, name) {
+  document.getElementById('fields-modal-title').textContent = '字段配置 · ' + name;
+  document.getElementById('fields-modal').classList.add('show');
+  document.getElementById('fields-table-body').innerHTML = '<tr><td colspan="4" class="cell-muted" style="text-align:center;padding:24px;">加载中...</td></tr>';
+  MockAPI.listTopicFields().then(function (fields) {
+    document.getElementById('fields-table-body').innerHTML = fields.map(function (f) {
+      return '<tr>' +
+        '<td class="cell-mono">' + f.field + '</td>' +
+        '<td><span class="badge badge-muted">' + f.type + '</span></td>' +
+        '<td>' + (f.indexed ? '<span class="badge badge-success">已索引</span>' : '<span class="badge badge-muted">未索引</span>') + '</td>' +
+        '<td class="cell-mono cell-muted">' + f.analyzer + '</td>' +
+      '</tr>';
+    }).join('');
+    lucide.createIcons();
+  });
+}
+
+document.getElementById('tpc-search').addEventListener('input', renderTable);
+document.getElementById('tpc-ws-filter').addEventListener('change', renderTable);
+document.getElementById('btn-new-tpc').addEventListener('click', function () { showToast('新建主题表单（原型未实现）'); });
+document.getElementById('fields-modal-close').addEventListener('click', function () { document.getElementById('fields-modal').classList.remove('show'); });
+document.getElementById('fields-close-btn').addEventListener('click', function () { document.getElementById('fields-modal').classList.remove('show'); });
+document.getElementById('fields-add-btn').addEventListener('click', function () { showToast('新增字段表单（原型未实现）'); });
+document.getElementById('fields-modal').addEventListener('click', function (e) {
+  if (e.target.id === 'fields-modal') document.getElementById('fields-modal').classList.remove('show');
+});
+
+MockAPI.listWorkspaces().then(function (wss) {
+  wss.forEach(function (w) { wsMap[w.uuid] = w.name; });
+  var sel = document.getElementById('tpc-ws-filter');
+  wss.forEach(function (w) {
+    var opt = document.createElement('option');
+    opt.value = w.uuid;
+    opt.textContent = w.name;
+    sel.appendChild(opt);
+  });
+  return MockAPI.listTopics();
+}).then(function (topics) {
+  allTopics = topics;
+  updateStats();
+  renderTable();
+});
+</script>
+</body>
+</html>

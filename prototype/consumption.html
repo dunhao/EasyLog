@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 消费组</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+  <script src="assets/mock.js"></script>
+  <script src="assets/charts.js"></script>
+  <script>
+    /* ---------- Toast helper ---------- */
+    function showToast(message) {
+      let toast = document.getElementById('toast-overlay');
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast-overlay';
+        toast.className = 'modal-overlay';
+        toast.style.alignItems = 'center';
+        toast.style.justifyContent = 'center';
+        toast.style.background = 'rgba(0,0,0,0.3)';
+        document.body.appendChild(toast);
+      }
+      toast.innerHTML = `
+        <div style="background:var(--bg-surface);border:1px solid var(--border-base);
+                    border-radius:var(--radius-lg);padding:var(--space-4) var(--space-5);
+                    box-shadow:var(--shadow-lg);min-width:240px;text-align:center;">
+          <div style="font-size:var(--text-md);color:var(--text-primary);">${message}</div>
+        </div>`;
+      toast.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    /* ---------- State ---------- */
+    let groups = [];
+    let topics = [];
+    let workspaces = [];
+    let tokenRevealed = {}; // uuid -> bool
+
+    /* ---------- Render page ---------- */
+    async function initPage() {
+      groups = await MockAPI.listConsumptionGroups();
+      topics = await MockAPI.listTopics();
+      workspaces = await MockAPI.listWorkspaces();
+
+      const totalGroups = groups.length;
+      const activeMembers = groups.reduce((s, g) => s + g.members, 0);
+      const totalLag = groups.reduce((s, g) => s + g.lag, 0);
+      const todayConsumed = '4.6 GB';
+
+      const statsHTML = `
+        <div class="grid grid-cols-4 mb-5">
+          ${EasyLogUI.statCard('消费组总数', totalGroups, '较昨日 +1', 'trend-up')}
+          ${EasyLogUI.statCard('活跃成员数', activeMembers, '稳定', 'trend-flat')}
+          ${EasyLogUI.statCard('总积压 (Lag)', EasyLogUI.formatNumber(totalLag), totalLag > 1000 ? '需关注' : '健康', totalLag > 1000 ? 'trend-down' : 'trend-up')}
+          ${EasyLogUI.statCard('今日消费量', todayConsumed, '+12% vs 昨日', 'trend-up')}
+        </div>
+      `;
+
+      const descCardHTML = `
+        <div class="card mb-5" style="display:flex;gap:var(--space-4);align-items:flex-start;">
+          <div style="width:36px;height:36px;border-radius:var(--radius-md);background:var(--accent-bg);
+                      display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <i data-lucide="info" style="width:18px;height:18px;color:var(--accent-primary);"></i>
+          </div>
+          <div>
+            <div style="font-size:var(--text-md);font-weight:600;margin-bottom:var(--space-1);">消费组 (Kafka Consumer Group)</div>
+            <div style="font-size:var(--text-sm);color:var(--text-secondary);line-height:1.6;">
+              消费组允许业务方按 Kafka 协议消费 EasyLog 中的日志流，用于实时数据管道、ETL 任务、二次分析。
+              每个消费组拥有独立的 Auth Token、消费位点 (offset) 与积压 (Lag) 监控。
+            </div>
+          </div>
+        </div>
+      `;
+
+      const tableHTML = renderTable();
+
+      const mainHTML = statsHTML + descCardHTML + tableHTML;
+
+      EasyLogUI.render({
+        activeNavKey: 'consumption',
+        pageTitle: '消费组',
+        breadcrumbHTML: '<a href="index.html">概览</a><span class="breadcrumb-sep">/</span><span>接入与流转</span><span class="breadcrumb-sep">/</span><span>消费组</span>',
+        actionsHTML: `<button class="btn btn-primary" onclick="openCreateModal()"><i data-lucide="plus"></i>新建消费组</button>`,
+        mainHTML
+      });
+
+      lucide.createIcons();
+      renderCreateModal();
+    }
+
+    function renderTable() {
+      const rows = groups.map(g => {
+        const topic = topics.find(t => t.uuid === g.topic_uuid);
+        const ws = workspaces.find(w => w.uuid === g.workspace_uuid);
+        const topicLabel = topic ? `${topic.name} <span class="cell-muted text-xs">/ ${ws ? ws.name : ''}</span>` : g.topic_uuid;
+        const revealed = tokenRevealed[g.uuid];
+        const tokenDisplay = revealed
+          ? `tok_x9f3k2${g.uuid.slice(-4)}${g.consumer_group.slice(0,2)}`
+          : g.auth_token_masked;
+        const lagBadge = g.lag === 0
+          ? `<span class="badge badge-success">0</span>`
+          : (g.lag > 1000
+            ? `<span class="badge badge-danger">${EasyLogUI.formatNumber(g.lag)}</span>`
+            : `<span class="badge badge-warning">${EasyLogUI.formatNumber(g.lag)}</span>`);
+        const statusBadge = EasyLogUI.statusBadge(g.status);
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:500;">${g.consumer_group}</div>
+              <div class="cell-muted text-xs">${g.uuid}</div>
+            </td>
+            <td>${topicLabel}</td>
+            <td>
+              <div class="flex items-center gap-2">
+                <code class="cell-mono">${tokenDisplay}</code>
+                <button class="btn btn-ghost btn-sm btn-icon-only" title="复制 Token" onclick="copyToken('${g.uuid}')">
+                  <i data-lucide="copy" style="width:12px;height:12px;"></i>
+                </button>
+                <button class="btn btn-ghost btn-sm btn-icon-only" title="${revealed ? '隐藏' : '显示'}" onclick="toggleToken('${g.uuid}')">
+                  <i data-lucide="${revealed ? 'eye-off' : 'eye'}" style="width:12px;height:12px;"></i>
+                </button>
+              </div>
+            </td>
+            <td>${g.members}</td>
+            <td>${lagBadge}</td>
+            <td>${statusBadge}</td>
+            <td class="cell-muted">${g.created_at}</td>
+            <td>
+              <div class="flex gap-1">
+                <button class="btn btn-ghost btn-sm" title="详情" onclick="showDetail('${g.uuid}')">
+                  <i data-lucide="external-link" style="width:12px;height:12px;"></i>详情
+                </button>
+                <button class="btn btn-secondary btn-sm" title="重置 offset" onclick="resetOffset('${g.uuid}')">
+                  <i data-lucide="rotate-ccw" style="width:12px;height:12px;"></i>重置
+                </button>
+                <button class="btn btn-secondary btn-sm" title="${g.status === 'active' ? '暂停' : '恢复'}" onclick="togglePause('${g.uuid}')">
+                  <i data-lucide="${g.status === 'active' ? 'pause' : 'play'}" style="width:12px;height:12px;"></i>${g.status === 'active' ? '暂停' : '恢复'}
+                </button>
+                <button class="btn btn-ghost btn-sm" title="删除" onclick="deleteGroup('${g.uuid}')">
+                  <i data-lucide="trash-2" style="width:12px;height:12px;color:var(--danger);"></i>
+                </button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      return `
+        <div class="table-wrap">
+          <div class="card-header" style="padding:var(--space-4);">
+            <div>
+              <div class="card-title">消费组列表</div>
+              <div class="card-subtitle">共 ${groups.length} 个消费组</div>
+            </div>
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>消费组名</th>
+                <th>所属主题</th>
+                <th>Auth Token</th>
+                <th>成员数</th>
+                <th>Lag (积压)</th>
+                <th>状态</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderCreateModal() {
+      const modal = document.createElement('div');
+      modal.id = 'create-modal';
+      modal.className = 'modal-overlay';
+      modal.innerHTML = `
+        <div class="modal">
+          <div class="modal-header">
+            <div class="modal-title">新建消费组</div>
+            <button class="modal-close" onclick="closeModal('create-modal')"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row">
+              <label class="form-label">消费组名 <span class="req">*</span></label>
+              <input class="form-input" id="cg-name" placeholder="例如：etl-spark-job" />
+              <div class="form-hint">消费组名称需符合 Kafka 命名规范：字母数字、- _ .</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">目标主题 <span class="req">*</span></label>
+              <select class="form-select" id="cg-topic">
+                ${topics.map(t => {
+                  const ws = workspaces.find(w => w.uuid === t.workspace_uuid);
+                  return `<option value="${t.uuid}">${ws ? ws.name + ' / ' : ''}${t.name}</option>`;
+                }).join('')}
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">Auth Token</label>
+              <div style="display:flex;gap:var(--space-2);align-items:center;">
+                <input class="form-input cell-mono" id="cg-token" readonly
+                       value="tok_${Math.random().toString(36).slice(2, 14)}" style="flex:1;" />
+                <button class="btn btn-secondary" onclick="copyNewToken()">
+                  <i data-lucide="copy" style="width:14px;height:14px;"></i>复制
+                </button>
+              </div>
+              <div class="form-hint">Token 仅在创建时展示一次，请妥善保存。</div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeModal('create-modal')">取消</button>
+            <button class="btn btn-primary" onclick="submitCreate()"><i data-lucide="check"></i>创建</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      lucide.createIcons();
+    }
+
+    function openCreateModal() {
+      document.getElementById('create-modal').classList.add('show');
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('show');
+    }
+
+    function copyNewToken() {
+      const input = document.getElementById('cg-token');
+      navigator.clipboard?.writeText(input.value);
+      showToast('Token 已复制到剪贴板');
+    }
+
+    async function submitCreate() {
+      const name = document.getElementById('cg-name').value.trim();
+      if (!name) { showToast('请填写消费组名'); return; }
+      closeModal('create-modal');
+      showToast(`消费组 ${name} 创建成功`);
+      // mock: append and re-render
+      const topicUuid = document.getElementById('cg-topic').value;
+      groups.push({
+        uuid: 'cg_new_' + Date.now(),
+        workspace_uuid: (topics.find(t => t.uuid === topicUuid) || {}).workspace_uuid || '',
+        topic_uuid: topicUuid,
+        consumer_group: name,
+        auth_token_masked: 'tok_************',
+        members: 0, lag: 0, status: 'active',
+        created_at: new Date().toISOString().slice(0, 10)
+      });
+      await reRender();
+    }
+
+    function copyToken(uuid) {
+      const g = groups.find(x => x.uuid === uuid);
+      navigator.clipboard?.writeText(g ? g.auth_token_masked : '');
+      showToast('Token 已复制');
+    }
+
+    function toggleToken(uuid) {
+      tokenRevealed[uuid] = !tokenRevealed[uuid];
+      reRender();
+    }
+
+    function showDetail(uuid) {
+      const g = groups.find(x => x.uuid === uuid);
+      if (!g) return;
+      const topic = topics.find(t => t.uuid === g.topic_uuid);
+      const ws = workspaces.find(w => w.uuid === g.workspace_uuid);
+      let modal = document.getElementById('detail-modal');
+      if (modal) modal.remove();
+      modal = document.createElement('div');
+      modal.id = 'detail-modal';
+      modal.className = 'modal-overlay show';
+      modal.innerHTML = `
+        <div class="modal">
+          <div class="modal-header">
+            <div class="modal-title">消费组详情 · ${g.consumer_group}</div>
+            <button class="modal-close" onclick="closeModal('detail-modal')"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="grid grid-cols-2 gap-3" style="margin-bottom:var(--space-4);">
+              <div class="card"><div class="stat-label">UUID</div><div class="cell-mono text-sm">${g.uuid}</div></div>
+              <div class="card"><div class="stat-label">状态</div><div>${EasyLogUI.statusBadge(g.status)}</div></div>
+              <div class="card"><div class="stat-label">工作空间</div><div class="text-sm">${ws ? ws.name : g.workspace_uuid}</div></div>
+              <div class="card"><div class="stat-label">主题</div><div class="text-sm">${topic ? topic.name : g.topic_uuid}</div></div>
+              <div class="card"><div class="stat-label">成员数</div><div class="stat-value" style="font-size:var(--text-xl);">${g.members}</div></div>
+              <div class="card"><div class="stat-label">积压 Lag</div><div class="stat-value" style="font-size:var(--text-xl);">${EasyLogUI.formatNumber(g.lag)}</div></div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">Auth Token</label>
+              <code class="cell-mono" style="background:var(--bg-base);padding:var(--space-2) var(--space-3);display:block;border-radius:var(--radius-md);border:1px solid var(--border-base);">${g.auth_token_masked}</code>
+            </div>
+            <div class="form-row">
+              <label class="form-label">创建时间</label>
+              <div class="text-sm">${g.created_at}</div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeModal('detail-modal')">关闭</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      lucide.createIcons();
+    }
+
+    function resetOffset(uuid) {
+      const g = groups.find(x => x.uuid === uuid);
+      if (g) g.lag = 0;
+      showToast('已重置 offset 到最新');
+      reRender();
+    }
+
+    function togglePause(uuid) {
+      const g = groups.find(x => x.uuid === uuid);
+      if (!g) return;
+      g.status = g.status === 'active' ? 'paused' : 'active';
+      showToast(`消费组已${g.status === 'active' ? '恢复' : '暂停'}`);
+      reRender();
+    }
+
+    function deleteGroup(uuid) {
+      if (!confirm('确认删除该消费组？此操作不可撤销。')) return;
+      groups = groups.filter(g => g.uuid !== uuid);
+      showToast('消费组已删除');
+      reRender();
+    }
+
+    async function reRender() {
+      const mainHTML = `
+        <div class="grid grid-cols-4 mb-5">
+          ${EasyLogUI.statCard('消费组总数', groups.length, '较昨日 +1', 'trend-up')}
+          ${EasyLogUI.statCard('活跃成员数', groups.reduce((s,g)=>s+g.members,0), '稳定', 'trend-flat')}
+          ${EasyLogUI.statCard('总积压 (Lag)', EasyLogUI.formatNumber(groups.reduce((s,g)=>s+g.lag,0)), '健康', 'trend-up')}
+          ${EasyLogUI.statCard('今日消费量', '4.6 GB', '+12%', 'trend-up')}
+        </div>
+        <div class="card mb-5" style="display:flex;gap:var(--space-4);align-items:flex-start;">
+          <div style="width:36px;height:36px;border-radius:var(--radius-md);background:var(--accent-bg);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <i data-lucide="info" style="width:18px;height:18px;color:var(--accent-primary);"></i>
+          </div>
+          <div>
+            <div style="font-size:var(--text-md);font-weight:600;margin-bottom:var(--space-1);">消费组 (Kafka Consumer Group)</div>
+            <div style="font-size:var(--text-sm);color:var(--text-secondary);line-height:1.6;">
+              消费组允许业务方按 Kafka 协议消费 EasyLog 中的日志流，用于实时数据管道、ETL 任务、二次分析。
+              每个消费组拥有独立的 Auth Token、消费位点 (offset) 与积压 (Lag) 监控。
+            </div>
+          </div>
+        </div>
+        ${renderTable()}
+      `;
+      EasyLogUI.render({
+        activeNavKey: 'consumption',
+        pageTitle: '消费组',
+        breadcrumbHTML: '<a href="index.html">概览</a><span class="breadcrumb-sep">/</span><span>接入与流转</span><span class="breadcrumb-sep">/</span><span>消费组</span>',
+        actionsHTML: `<button class="btn btn-primary" onclick="openCreateModal()"><i data-lucide="plus"></i>新建消费组</button>`,
+        mainHTML
+      });
+      lucide.createIcons();
+    }
+
+    initPage();
+  </script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+{
+  "server": {
+    "url": "http://127.0.0.1:9515/api/v1",
+    "app_id": "app_demo_001",
+    "app_secret": "sec_demo_001",
+    "timeout": 10
+  },
+
+  "topic": "",
+  "state_file": "./easylog-agent.state.json",
+  "batch_size": 500,
+  "flush_interval_ms": 2000,
+  "scan_interval_ms": 2000,
+  "max_buffer": 100000,
+  "start_position": "end",
+  "host_field": "host",
+
+  "watches": [
+    {
+      "path": "/var/www/app/runtime/log",
+      "recursive": true,
+      "pattern": "*.log",
+      "parser": "thinkphp",
+      "topic": "",
+      "start_position": "beginning",
+      "source_prefix": "app1",
+      "fields": { "project": "app1" }
+    },
+    {
+      "path": "/var/www/app/storage/logs/laravel-*.log",
+      "parser": "laravel"
+    },
+    {
+      "path": "/data/services/*/logs/app-*.log",
+      "parser": "json",
+      "fields": { "env": "prod" }
+    },
+    {
+      "path": "/var/log/nginx/access-*.log",
+      "parser": "regex",
+      "line_pattern": "^(?<ts>\\S+ \\S+)\\s+(?<level>\\w+)\\s+(?<msg>.*)$"
+    }
+  ]
+}

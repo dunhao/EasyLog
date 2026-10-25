@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 用户权限</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+  <script src="assets/mock.js"></script>
+  <script src="assets/charts.js"></script>
+  <script>
+    /* ---------- Toast helper ---------- */
+    function showToast(message) {
+      let toast = document.getElementById('toast-overlay');
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast-overlay';
+        toast.className = 'modal-overlay';
+        toast.style.alignItems = 'center';
+        toast.style.justifyContent = 'center';
+        toast.style.background = 'rgba(0,0,0,0.3)';
+        document.body.appendChild(toast);
+      }
+      toast.innerHTML = `
+        <div style="background:var(--bg-surface);border:1px solid var(--border-base);
+                    border-radius:var(--radius-lg);padding:var(--space-4) var(--space-5);
+                    box-shadow:var(--shadow-lg);min-width:240px;text-align:center;">
+          <div style="font-size:var(--text-md);color:var(--text-primary);">${message}</div>
+        </div>`;
+      toast.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    /* ---------- State ---------- */
+    let users = [];
+    let auditLogs = [];
+    let workspaces = [];
+    let activeTab = 'list';
+    let searchTerm = '';
+    let auditFilters = { action: '', user: '', range: '7d' };
+
+    /* Role matrix - 10 permissions */
+    const ROLES = [
+      {
+        key: 'owner', label: 'Owner', desc: '工作空间所有者，拥有全部权限，可转让/删除工作空间',
+        color: 'danger',
+        perms: { 'workspaces.*': true, 'topics.*': true, 'endpoints.*': true, 'search.*': true,
+                 'dashboards.*': true, 'alerts.*': true, 'shipping.*': true, 'consumption.*': true,
+                 'usage.view': true, 'users.*': true, 'settings.*': true }
+      },
+      {
+        key: 'admin', label: 'Admin', desc: '运维管理员，可管理资源与配置告警',
+        color: 'info',
+        perms: { 'workspaces.*': true, 'topics.*': true, 'endpoints.*': true, 'search.*': true,
+                 'dashboards.*': true, 'alerts.*': true, 'shipping.*': true, 'consumption.*': true,
+                 'usage.view': true, 'users.*': false, 'settings.*': true }
+      },
+      {
+        key: 'viewer', label: 'Viewer', desc: '只读用户，仅可检索日志与查看仪表盘',
+        color: 'muted',
+        perms: { 'workspaces.*': false, 'topics.*': false, 'endpoints.*': false, 'search.*': true,
+                 'dashboards.*': true, 'alerts.*': false, 'shipping.*': false, 'consumption.*': false,
+                 'usage.view': false, 'users.*': false, 'settings.*': false }
+      },
+      {
+        key: 'billing', label: 'Billing', desc: '财务角色，仅可查看用量与配额',
+        color: 'warning',
+        perms: { 'workspaces.*': false, 'topics.*': false, 'endpoints.*': false, 'search.*': false,
+                 'dashboards.*': false, 'alerts.*': false, 'shipping.*': false, 'consumption.*': false,
+                 'usage.view': true, 'users.*': false, 'settings.*': false }
+      }
+    ];
+    const PERM_KEYS = ['workspaces.*','topics.*','endpoints.*','search.*','dashboards.*','alerts.*','shipping.*','consumption.*','usage.view','users.*','settings.*'];
+
+    function roleBadge(role) {
+      const map = { owner: 'danger', admin: 'info', viewer: 'muted', billing: 'warning' };
+      return `<span class="badge badge-${map[role] || 'muted'}">${role}</span>`;
+    }
+
+    function statusBadge(status) {
+      const map = { active: 'success', suspended: 'muted', pending: 'warning' };
+      const labels = { active: '正常', suspended: '已停用', pending: '待激活' };
+      return `<span class="badge badge-${map[status] || 'muted'}">${labels[status] || status}</span>`;
+    }
+
+    function initials(name) {
+      return (name || '?').slice(0, 2).toUpperCase();
+    }
+
+    /* ---------- Init ---------- */
+    async function initPage() {
+      users = await MockAPI.listUsers();
+      auditLogs = await MockAPI.listAuditLogs();
+      workspaces = await MockAPI.listWorkspaces();
+      renderPage();
+    }
+
+    function renderPage() {
+      const tabsHTML = `
+        <div class="tabs mb-4">
+          <div class="tab ${activeTab === 'list' ? 'active' : ''}" onclick="switchTab('list')">
+            <i data-lucide="users" style="width:14px;height:14px;display:inline;vertical-align:middle;margin-right:4px;"></i>用户列表
+          </div>
+          <div class="tab ${activeTab === 'roles' ? 'active' : ''}" onclick="switchTab('roles')">
+            <i data-lucide="shield-check" style="width:14px;height:14px;display:inline;vertical-align:middle;margin-right:4px;"></i>角色权限
+          </div>
+          <div class="tab ${activeTab === 'audit' ? 'active' : ''}" onclick="switchTab('audit')">
+            <i data-lucide="scroll-text" style="width:14px;height:14px;display:inline;vertical-align:middle;margin-right:4px;"></i>审计日志
+          </div>
+        </div>
+      `;
+      let contentHTML = '';
+      if (activeTab === 'list') contentHTML = renderListTab();
+      else if (activeTab === 'roles') contentHTML = renderRolesTab();
+      else contentHTML = renderAuditTab();
+
+      const actionsHTML = activeTab === 'list'
+        ? `<button class="btn btn-primary" onclick="openInviteModal()"><i data-lucide="user-plus"></i>邀请用户</button>`
+        : '';
+
+      EasyLogUI.render({
+        activeNavKey: 'users',
+        pageTitle: '用户权限',
+        breadcrumbHTML: '<a href="index.html">概览</a><span class="breadcrumb-sep">/</span><span>管理</span><span class="breadcrumb-sep">/</span><span>用户权限</span>',
+        actionsHTML,
+        mainHTML: tabsHTML + contentHTML
+      });
+      lucide.createIcons();
+    }
+
+    function renderListTab() {
+      const filtered = users.filter(u => {
+        if (!searchTerm) return true;
+        const q = searchTerm.toLowerCase();
+        return u.email.toLowerCase().includes(q) || u.name.toLowerCase().includes(q);
+      });
+      return `
+        <div class="flex items-center gap-2 mb-4">
+          <div class="global-search" style="max-width:280px;position:relative;">
+            <i data-lucide="search" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text-muted);width:14px;height:14px;"></i>
+            <input type="text" class="form-input" placeholder="搜索用户名或邮箱" value="${searchTerm}"
+                   oninput="onSearch(this.value)" style="padding-left:32px;" />
+          </div>
+          <span class="text-xs text-muted">共 ${filtered.length} / ${users.length} 名用户</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th>最近登录</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtered.map(u => `
+                <tr>
+                  <td>
+                    <div class="flex items-center gap-3">
+                      <div class="user-avatar" style="background:linear-gradient(135deg, ${u.avatar_color}, #A625FF);">${initials(u.name)}</div>
+                      <div>
+                        <div style="font-weight:500;">${u.name}</div>
+                        <div class="cell-muted text-xs">${u.email}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>${roleBadge(u.role)}</td>
+                  <td>${statusBadge(u.status)}</td>
+                  <td class="cell-muted">${u.last_login}</td>
+                  <td>
+                    <div class="flex gap-1">
+                      <button class="btn btn-secondary btn-sm" onclick="editRole(${u.id})">
+                        <i data-lucide="pencil" style="width:12px;height:12px;"></i>编辑角色
+                      </button>
+                      <button class="btn btn-secondary btn-sm" onclick="resetPassword(${u.id})">
+                        <i data-lucide="key-round" style="width:12px;height:12px;"></i>重置密码
+                      </button>
+                      <button class="btn btn-ghost btn-sm" onclick="toggleUser(${u.id})">
+                        <i data-lucide="${u.status === 'active' ? 'user-x' : 'user-check'}" style="width:12px;height:12px;color:${u.status === 'active' ? 'var(--danger)' : 'var(--success)'};"></i>${u.status === 'active' ? '停用' : '启用'}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderRolesTab() {
+      return `
+        <div class="grid grid-cols-2 gap-4">
+          ${ROLES.map(r => `
+            <div class="card">
+              <div class="card-header">
+                <div class="flex items-center gap-3">
+                  <div style="width:36px;height:36px;border-radius:var(--radius-md);background:var(--accent-bg);display:flex;align-items:center;justify-content:center;">
+                    <i data-lucide="shield" style="width:18px;height:18px;color:var(--accent-primary);"></i>
+                  </div>
+                  <div>
+                    <div style="font-size:var(--text-md);font-weight:600;">${r.label}</div>
+                    <div class="card-subtitle">${r.desc}</div>
+                  </div>
+                </div>
+                <span class="badge badge-${r.color}">${r.label.toUpperCase()}</span>
+              </div>
+              <table class="tbl" style="margin-top:var(--space-3);">
+                <thead>
+                  <tr><th>权限项</th><th style="text-align:center;width:80px;">授权</th></tr>
+                </thead>
+                <tbody>
+                  ${PERM_KEYS.map(p => {
+                    const ok = r.perms[p];
+                    return `
+                      <tr>
+                        <td class="cell-mono text-xs">${p}</td>
+                        <td style="text-align:center;">
+                          ${ok
+                            ? `<i data-lucide="check" style="width:14px;height:14px;color:var(--success);"></i>`
+                            : `<i data-lucide="x" style="width:14px;height:14px;color:var(--text-muted);"></i>`}
+                        </td>
+                      </tr>
+                    `;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function renderAuditTab() {
+      const actions = [...new Set(auditLogs.map(l => l.action))];
+      const usernames = [...new Set(auditLogs.map(l => l.user))];
+      const filtered = auditLogs.filter(l => {
+        if (auditFilters.action && l.action !== auditFilters.action) return false;
+        if (auditFilters.user && l.user !== auditFilters.user) return false;
+        return true;
+      });
+
+      return `
+        <div class="flex items-center gap-2 mb-4" style="flex-wrap:wrap;">
+          <span class="text-sm text-secondary">操作类型：</span>
+          <select class="form-select" style="width:auto;" onchange="onFilterChange('action', this.value)">
+            <option value="">全部</option>
+            ${actions.map(a => `<option value="${a}" ${auditFilters.action === a ? 'selected' : ''}>${a}</option>`).join('')}
+          </select>
+          <span class="text-sm text-secondary">操作人：</span>
+          <select class="form-select" style="width:auto;" onchange="onFilterChange('user', this.value)">
+            <option value="">全部</option>
+            ${usernames.map(u => `<option value="${u}" ${auditFilters.user === u ? 'selected' : ''}>${u}</option>`).join('')}
+          </select>
+          <span class="text-sm text-secondary">时间范围：</span>
+          <select class="form-select" style="width:auto;" onchange="onFilterChange('range', this.value)">
+            <option value="7d" ${auditFilters.range === '7d' ? 'selected' : ''}>近 7 天</option>
+            <option value="30d" ${auditFilters.range === '30d' ? 'selected' : ''}>近 30 天</option>
+            <option value="month" ${auditFilters.range === 'month' ? 'selected' : ''}>本月</option>
+          </select>
+          <button class="btn btn-secondary btn-sm" onclick="exportAudit()">
+            <i data-lucide="download" style="width:12px;height:12px;"></i>导出
+          </button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>操作人</th>
+                <th>动作</th>
+                <th>目标</th>
+                <th>上下文</th>
+                <th>IP</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filtered.map(l => `
+                <tr>
+                  <td class="cell-mono cell-muted">${l.ts}</td>
+                  <td>${l.user === 'system' ? `<span class="badge badge-muted">system</span>` : l.user}</td>
+                  <td><code class="cell-mono text-xs">${l.action}</code></td>
+                  <td class="cell-mono text-xs">${l.target}</td>
+                  <td>${l.context}</td>
+                  <td class="cell-mono cell-muted">${l.ip}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    /* ---------- Handlers ---------- */
+    function switchTab(tab) {
+      activeTab = tab;
+      renderPage();
+    }
+
+    function onSearch(val) {
+      searchTerm = val;
+      // Re-render only the table area without full DOM replace to preserve input focus
+      const main = document.querySelector('.main-content');
+      if (main) {
+        // Find the table-wrap and update it; simpler: full render and refocus
+      }
+      renderPage();
+      // Refocus
+      setTimeout(() => {
+        const input = document.querySelector('.global-search input');
+        if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+      }, 0);
+    }
+
+    function onFilterChange(key, val) {
+      auditFilters[key] = val;
+      renderPage();
+    }
+
+    function openInviteModal() {
+      let modal = document.getElementById('invite-modal');
+      if (modal) modal.remove();
+      modal = document.createElement('div');
+      modal.id = 'invite-modal';
+      modal.className = 'modal-overlay show';
+      modal.innerHTML = `
+        <div class="modal">
+          <div class="modal-header">
+            <div class="modal-title">邀请用户</div>
+            <button class="modal-close" onclick="closeModal('invite-modal')"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row">
+              <label class="form-label">邮箱 <span class="req">*</span></label>
+              <input class="form-input" id="inv-email" type="email" placeholder="user@example.com" />
+            </div>
+            <div class="form-row">
+              <label class="form-label">角色 <span class="req">*</span></label>
+              <select class="form-select" id="inv-role">
+                <option value="viewer">Viewer · 只读</option>
+                <option value="admin">Admin · 运维管理</option>
+                <option value="billing">Billing · 财务</option>
+                <option value="owner">Owner · 所有者</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">可访问工作空间 <span class="req">*</span></label>
+              <div style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto;padding:var(--space-2);background:var(--bg-base);border:1px solid var(--border-base);border-radius:var(--radius-md);">
+                ${workspaces.map(w => `
+                  <label class="filter-item" style="cursor:pointer;">
+                    <input type="checkbox" value="${w.uuid}" style="margin-right:8px;" />${w.name} <span class="cell-muted text-xs">${w.uuid}</span>
+                  </label>
+                `).join('')}
+              </div>
+              <div class="form-hint">可多选；用户将获得所选工作空间对应角色的权限。</div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeModal('invite-modal')">取消</button>
+            <button class="btn btn-primary" onclick="submitInvite()"><i data-lucide="send"></i>发送邀请</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      lucide.createIcons();
+    }
+
+    function closeModal(id) {
+      const el = document.getElementById(id);
+      if (el) el.classList.remove('show');
+    }
+
+    function submitInvite() {
+      const email = document.getElementById('inv-email').value.trim();
+      if (!email || !email.includes('@')) { showToast('请输入有效邮箱'); return; }
+      const role = document.getElementById('inv-role').value;
+      const checked = document.querySelectorAll('#invite-modal input[type=checkbox]:checked');
+      if (checked.length === 0) { showToast('请至少选择一个工作空间'); return; }
+      closeModal('invite-modal');
+      showToast(`邀请已发送至 ${email}（${role}）`);
+    }
+
+    function editRole(id) {
+      const u = users.find(x => x.id === id);
+      if (!u) return;
+      let modal = document.getElementById('edit-role-modal');
+      if (modal) modal.remove();
+      modal = document.createElement('div');
+      modal.id = 'edit-role-modal';
+      modal.className = 'modal-overlay show';
+      modal.innerHTML = `
+        <div class="modal">
+          <div class="modal-header">
+            <div class="modal-title">编辑角色 · ${u.name}</div>
+            <button class="modal-close" onclick="closeModal('edit-role-modal')"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row">
+              <label class="form-label">用户</label>
+              <div class="text-sm">${u.email}</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">当前角色</label>
+              <div>${roleBadge(u.role)}</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">新角色 <span class="req">*</span></label>
+              <select class="form-select" id="edit-role">
+                <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer · 只读</option>
+                <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin · 运维管理</option>
+                <option value="billing" ${u.role === 'billing' ? 'selected' : ''}>Billing · 财务</option>
+                <option value="owner" ${u.role === 'owner' ? 'selected' : ''}>Owner · 所有者</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeModal('edit-role-modal')">取消</button>
+            <button class="btn btn-primary" onclick="submitRoleEdit(${id})"><i data-lucide="check"></i>保存</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      lucide.createIcons();
+    }
+
+    function submitRoleEdit(id) {
+      const role = document.getElementById('edit-role').value;
+      const u = users.find(x => x.id === id);
+      if (u) u.role = role;
+      closeModal('edit-role-modal');
+      showToast('角色已更新');
+      renderPage();
+    }
+
+    function resetPassword(id) {
+      const u = users.find(x => x.id === id);
+      if (!u) return;
+      if (!confirm(`确认向 ${u.email} 发送密码重置邮件？`)) return;
+      showToast('重置邮件已发送');
+    }
+
+    function toggleUser(id) {
+      const u = users.find(x => x.id === id);
+      if (!u) return;
+      u.status = u.status === 'active' ? 'suspended' : 'active';
+      showToast(`用户已${u.status === 'active' ? '启用' : '停用'}`);
+      renderPage();
+    }
+
+    function exportAudit() {
+      showToast('审计日志导出任务已创建');
+    }
+
+    initPage();
+  </script>
+</body>
+</html>

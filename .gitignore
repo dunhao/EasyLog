@@ -1,0 +1,67 @@
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+
+# ---------- Editor ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---------- Env ----------
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ---------- Composer ----------
+auth.json
+
+# ---------- PHP / Laravel ----------
+services/admin/vendor
+services/admin/storage/framework/cache/data/*
+services/admin/storage/framework/sessions/*
+services/admin/storage/framework/views/*
+services/admin/storage/logs/*.log
+services/admin/storage/app/*
+!services/admin/storage/app/public/.gitkeep
+!services/admin/storage/framework/cache/data/.gitkeep
+!services/admin/storage/framework/sessions/.gitkeep
+!services/admin/storage/framework/views/.gitkeep
+!services/admin/storage/logs/.gitkeep
+services/admin/bootstrap/cache/*.php
+!services/admin/bootstrap/cache/.gitkeep
+services/admin/.phpunit.cache
+services/admin/coverage
+services/admin/database/*.sqlite
+services/admin/database/*.sqlite-journal
+*.log
+
+# ---------- Composer (workspace) ----------
+# composer.lock 必须入库：CI 与部署机的 composer install 依赖锁文件保证可复现
+vendor/
+
+# ---------- Frontend ----------
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---------- SDK ----------
+sdk/php/vendor
+sdk/php/coverage
+
+# ---------- Deploy ----------
+deploy/compose/data
+deploy/compose/.env.local
+
+# ---------- Misc ----------
+coverage/
+.phpunit.cache/
+.php-cs-fixer.cache
+
+.workbuddy
+.codegraph/

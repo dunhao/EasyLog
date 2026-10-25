@@ -1,0 +1,39 @@
+# 公共配置 + 敏感凭据
+# 部署前必改：Secret 中的 APP_KEY / DB_PASSWORD；ConfigMap 中的中间件地址
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: easylog-config
+  namespace: easylog
+data:
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  DB_CONNECTION: "mysql"
+  # 指向实际 MySQL 服务。若用 bitnami/mysql chart，主节点服务名通常为
+  # mysql-primary.easylog.svc.cluster.local；helm release 名不同则需相应调整。
+  DB_HOST: "mysql.easylog.svc.cluster.local"
+  DB_PORT: "3306"
+  DB_DATABASE: "log-service"
+  DB_USERNAME: "easylog"
+  REDIS_HOST: "redis-master.easylog.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_CLIENT: "phpredis"
+  KAFKA_BROKERS: "kafka.easylog.svc.cluster.local:9092"
+  STORAGE_DRIVER: "elasticsearch"
+  ES_HOSTS: "http://elasticsearch.easylog.svc.cluster.local:9200"
+  ES_INDEX_PREFIX: "easylog-"
+  MQ_BUS_DRIVER: "rdkafka"
+  MAIL_MAILER: "log"
+  MAIL_FROM_ADDRESS: "easylog@localhost"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: easylog-secret
+  namespace: easylog
+type: Opaque
+stringData:
+  # php artisan key:generate --show 生成，base64: 前缀保留
+  APP_KEY: "base64:PLEASE_REPLACE_ME_BEFORE_DEPLOY="
+  DB_PASSWORD: "PLEASE_REPLACE_ME"

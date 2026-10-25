@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 接入点</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<script src="assets/mock.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+  /* ---------- state ---------- */
+  let endpoints = [];
+  let topics = [];
+  let selectedSource = "kafka";
+
+  /* ---------- helpers ---------- */
+  function showToast(message, type) {
+    type = type || "info";
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay show";
+    overlay.style.zIndex = 2000;
+    const color = type === "success" ? "var(--success)" : type === "error" ? "var(--danger)" : "var(--accent-primary)";
+    const icon = type === "success" ? "check-circle" : type === "error" ? "x-circle" : "info";
+    overlay.innerHTML = `
+      <div class="modal" style="max-width: 360px; text-align: center;">
+        <div class="modal-body">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:12px;">
+            <i data-lucide="${icon}" style="width:32px;height:32px;color:${color};"></i>
+            <div style="font-size: var(--text-sm);">${message}</div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    if (window.lucide) lucide.createIcons();
+    setTimeout(function () { overlay.remove(); }, 2000);
+  }
+
+  function copyText(text) {
+    try { navigator.clipboard.writeText(text).then(function () { showToast("已复制: " + text, "success"); }); }
+    catch (e) { showToast("复制失败", "error"); }
+  }
+
+  function topicName(uuid) {
+    const t = topics.find(function (x) { return x.uuid === uuid; });
+    return t ? t.name : "—";
+  }
+
+  /* ---------- shell render ---------- */
+  function renderShell() {
+    const totalActive = endpoints.filter(function (e) { return e.status === "active"; }).length;
+    const totalIngest = endpoints.reduce(function (s, e) { return s + (e.ingest_count_today || 0); }, 0);
+    const mainHTML = `
+      <div class="grid grid-cols-4 mb-5">
+        ${EasyLogUI.statCard("接入点总数", endpoints.length, "", "trend-flat", "全部状态")}
+        ${EasyLogUI.statCard("今日活跃", totalActive, "↑ 2", "trend-up", "运行中")}
+        ${EasyLogUI.statCard("今日总写入量", EasyLogUI.formatNumber(totalIngest), "", "trend-flat", "条日志")}
+        ${EasyLogUI.statCard("今日限流次数", 12, "↓ 4", "trend-down", "近 24h")}
+      </div>
+
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>来源类型</th>
+              <th>所属主题</th>
+              <th>AppID</th>
+              <th>限流/秒</th>
+              <th>配额 GB/日</th>
+              <th>今日写入量</th>
+              <th>状态</th>
+              <th>最近活跃</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${endpoints.map(function (e) {
+              return `
+                <tr>
+                  <td>${e.name}</td>
+                  <td>${EasyLogUI.sourceBadge(e.source_type)}</td>
+                  <td>${topicName(e.topic_uuid)}</td>
+                  <td>
+                    <span class="cell-mono">${e.app_id}</span>
+                    <button class="btn btn-ghost btn-sm" style="height:20px;padding:0 4px;display:inline-flex;vertical-align:middle;" onclick="copyText('${e.app_id}')" title="复制 AppID">
+                      <i data-lucide="copy" style="width:12px;height:12px;"></i>
+                    </button>
+                  </td>
+                  <td>${e.rate_limit_per_sec}</td>
+                  <td>${e.daily_quota_gb}</td>
+                  <td>${EasyLogUI.formatNumber(e.ingest_count_today)}</td>
+                  <td>${EasyLogUI.statusBadge(e.status)}</td>
+                  <td class="cell-muted">${e.last_active || "—"}</td>
+                  <td>
+                    <button class="btn btn-sm btn-secondary" onclick="testEndpoint('${e.uuid}')" title="测试连接">
+                      <i data-lucide="plug-zap" style="width:12px;height:12px;"></i>测试
+                    </button>
+                    <button class="btn btn-sm btn-ghost" onclick="openEditEndpoint('${e.uuid}')" title="编辑">
+                      <i data-lucide="pencil" style="width:12px;height:12px;"></i>
+                    </button>
+                    <button class="btn btn-sm btn-ghost" onclick="rotateSecret('${e.uuid}')" title="轮换 Secret">
+                      <i data-lucide="key-round" style="width:12px;height:12px;"></i>
+                    </button>
+                    <button class="btn btn-sm btn-ghost" onclick="deleteEndpoint('${e.uuid}')" title="删除">
+                      <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
+                    </button>
+                  </td>
+                </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+
+      ${renderCreateModal()}
+    `;
+    const actionsHTML = `
+      <button class="btn btn-primary" onclick="openCreateEndpoint()">
+        <i data-lucide="plus"></i> 新建接入点
+      </button>`;
+    EasyLogUI.render({
+      activeNavKey: "endpoints",
+      pageTitle: "接入点",
+      breadcrumbHTML: '<a href="workspaces.html">工作空间</a><span class="breadcrumb-sep">/</span>Acme 生产<span class="breadcrumb-sep">/</span>接入点',
+      actionsHTML: actionsHTML,
+      mainHTML: mainHTML
+    });
+  }
+
+  /* ---------- create modal ---------- */
+  function renderCreateModal() {
+    const sources = [
+      { key: "http", label: "HTTP API", icon: "globe" },
+      { key: "sdk", label: "SDK 直推", icon: "code" },
+      { key: "kafka", label: "Kafka", icon: "zap" },
+      { key: "rabbitmq", label: "RabbitMQ", icon: "rabbit" },
+      { key: "redis", label: "Redis", icon: "database" },
+      { key: "activemq", label: "ActiveMQ", icon: "message-square" }
+    ];
+    return `
+      <div class="modal-overlay" id="endpointModal">
+        <div class="modal modal-xl">
+          <div class="modal-header">
+            <div class="modal-title">新建接入点</div>
+            <button class="modal-close" onclick="closeCreateEndpoint()"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row">
+              <div class="form-label">步骤 1 · 选择来源类型<span class="req">*</span></div>
+              <div class="source-pill-group" id="sourcePills">
+                ${sources.map(function (s) {
+                  return `<div class="source-pill ${selectedSource === s.key ? "active" : ""}" onclick="selectSource('${s.key}')"><i data-lucide="${s.icon}"></i>${s.label}</div>`;
+                }).join("")}
+              </div>
+            </div>
+
+            <div class="form-row mt-3"><div class="form-label">步骤 2 · 基本信息</div></div>
+            <div class="grid grid-cols-2">
+              <div class="form-row">
+                <label class="form-label">接入点名称<span class="req">*</span></label>
+                <input class="form-input" id="ep_name" placeholder="例: 订单 Kafka 接入" />
+              </div>
+              <div class="form-row">
+                <label class="form-label">目标主题<span class="req">*</span></label>
+                <select class="form-select" id="ep_topic">
+                  ${topics.map(function (t) { return `<option value="${t.uuid}">${t.name} (${t.description})</option>`; }).join("")}
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row mt-3"><div class="form-label">步骤 3 · 来源配置</div></div>
+
+            <!-- HTTP API -->
+            <div id="src_http" class="source-config" style="display:${selectedSource === "http" ? "block" : "none"};">
+              <div class="form-row">
+                <label class="form-label">AppID / AppSecret 凭证</label>
+                <div class="code-block">app_id:     app_new_x9f3k2
+app_secret: sec_********************************</div>
+                <div class="form-hint">凭证在创建后自动生成，可在接入点详情中轮换</div>
+              </div>
+              <div class="form-row">
+                <label class="form-label">调用示例 (curl)</label>
+                <div class="code-block">curl -X POST https://ingest.easylog.dev/v1/logs \\
+  -H "Authorization: Bearer sec_********************************" \\
+  -H "Content-Type: application/json" \\
+  -d '{"level":"INFO","msg":"hello","ts":"2026-09-12T14:32:00Z"}'</div>
+              </div>
+            </div>
+
+            <!-- SDK -->
+            <div id="src_sdk" class="source-config" style="display:${selectedSource === "sdk" ? "block" : "none"};">
+              <div class="form-row">
+                <label class="form-label">PHP SDK 安装</label>
+                <div class="code-block">composer require easylog/php-sdk</div>
+              </div>
+              <div class="form-row">
+                <label class="form-label">Monolog Handler 用法</label>
+                <div class="code-block">use EasyLog\\Handler\\EasyLogHandler;
+
+$log = new \\Monolog\\Logger('order');
+$log->pushHandler(new EasyLogHandler('app_x9f3k2', 'sec_***', 'tpc_order_logs'));
+$log->info('Order A1023 created', ['amount' => 199.0]);</div>
+              </div>
+            </div>
+
+            <!-- Kafka -->
+            <div id="src_kafka" class="source-config" style="display:${selectedSource === "kafka" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row" style="grid-column: 1 / -1;">
+                  <label class="form-label">Brokers（每行一个）<span class="req">*</span></label>
+                  <textarea class="form-textarea" id="kafka_brokers" rows="3" placeholder="kafka1:9092&#10;kafka2:9092"></textarea>
+                </div>
+                <div class="form-row">
+                  <label class="form-label">Topic Pattern</label>
+                  <input class="form-input" id="kafka_topic_pattern" placeholder="order-.* 或 order-events" />
+                </div>
+                <div class="form-row">
+                  <label class="form-label">Consumer Group</label>
+                  <input class="form-input" id="kafka_group" placeholder="easylog-cg-order" />
+                </div>
+                <div class="form-row">
+                  <label class="form-label">SASL Mechanism</label>
+                  <select class="form-select" id="kafka_sasl">
+                    <option value="PLAIN">PLAIN</option>
+                    <option value="SCRAM-SHA-512">SCRAM-SHA-512</option>
+                    <option value="GSSAPI">GSSAPI</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label class="form-label">用户名</label>
+                  <input class="form-input" id="kafka_user" placeholder="kafka user" />
+                </div>
+                <div class="form-row">
+                  <label class="form-label">密码</label>
+                  <input class="form-input" type="password" id="kafka_pass" placeholder="********" />
+                </div>
+                <div class="form-row">
+                  <label class="form-label">起始位置</label>
+                  <select class="form-select" id="kafka_offset">
+                    <option value="earliest">earliest</option>
+                    <option value="latest">latest</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label class="form-label">TLS 加密</label>
+                  <select class="form-select" id="kafka_tls">
+                    <option value="false">关闭</option>
+                    <option value="true">开启</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- RabbitMQ -->
+            <div id="src_rabbitmq" class="source-config" style="display:${selectedSource === "rabbitmq" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">Host<span class="req">*</span></label><input class="form-input" id="rmq_host" placeholder="rabbitmq.internal" /></div>
+                <div class="form-row"><label class="form-label">Port</label><input class="form-input" id="rmq_port" value="5672" /></div>
+                <div class="form-row"><label class="form-label">VHost</label><input class="form-input" id="rmq_vhost" placeholder="/" /></div>
+                <div class="form-row"><label class="form-label">用户名</label><input class="form-input" id="rmq_user" placeholder="guest" /></div>
+                <div class="form-row"><label class="form-label">密码</label><input class="form-input" type="password" id="rmq_pass" placeholder="********" /></div>
+                <div class="form-row"><label class="form-label">Queue</label><input class="form-input" id="rmq_queue" placeholder="order.events" /></div>
+                <div class="form-row"><label class="form-label">Exchange</label><input class="form-input" id="rmq_exchange" placeholder="order.exchange" /></div>
+                <div class="form-row"><label class="form-label">Routing Key</label><input class="form-input" id="rmq_routing_key" placeholder="order.*" /></div>
+                <div class="form-row"><label class="form-label">Exchange Type</label><select class="form-select" id="rmq_exchange_type"><option value="direct">direct</option><option value="topic">topic</option><option value="fanout">fanout</option><option value="headers">headers</option></select></div>
+                <div class="form-row"><label class="form-label">Prefetch Count</label><input class="form-input" id="rmq_prefetch" value="50" /></div>
+                <div class="form-row"><label class="form-label">auto_ack</label><select class="form-select" id="rmq_auto_ack"><option value="false">关闭</option><option value="true">开启</option></select></div>
+              </div>
+            </div>
+
+            <!-- Redis -->
+            <div id="src_redis" class="source-config" style="display:${selectedSource === "redis" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">消费模式</label><select class="form-select" id="redis_mode"><option value="stream">stream</option><option value="pubsub">pubsub</option><option value="list">list</option></select></div>
+                <div class="form-row"><label class="form-label">DSN<span class="req">*</span></label><input class="form-input" id="redis_dsn" placeholder="redis://:password@host:6379/0" /></div>
+                <div class="form-row"><label class="form-label">Stream Key</label><input class="form-input" id="redis_stream_key" placeholder="logs:order" /></div>
+                <div class="form-row"><label class="form-label">Consumer Group</label><input class="form-input" id="redis_group" placeholder="easylog-cg" /></div>
+                <div class="form-row"><label class="form-label">Consumer Name</label><input class="form-input" id="redis_consumer" placeholder="consumer-1" /></div>
+                <div class="form-row"><label class="form-label">Block (ms)</label><input class="form-input" id="redis_block" value="2000" /></div>
+                <div class="form-row"><label class="form-label">List Key（list 模式）</label><input class="form-input" id="redis_list_key" placeholder="logs:list" /></div>
+                <div class="form-row"><label class="form-label">Batch Size</label><input class="form-input" id="redis_batch" value="100" /></div>
+              </div>
+            </div>
+
+            <!-- ActiveMQ -->
+            <div id="src_activemq" class="source-config" style="display:${selectedSource === "activemq" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">Host<span class="req">*</span></label><input class="form-input" id="amq_host" placeholder="activemq.internal" /></div>
+                <div class="form-row"><label class="form-label">Port</label><input class="form-input" id="amq_port" value="61613" /></div>
+                <div class="form-row"><label class="form-label">Login</label><input class="form-input" id="amq_login" placeholder="admin" /></div>
+                <div class="form-row"><label class="form-label">Passcode</label><input class="form-input" type="password" id="amq_passcode" placeholder="********" /></div>
+                <div class="form-row"><label class="form-label">Destination Type</label><select class="form-select" id="amq_dst_type"><option value="queue">queue</option><option value="topic">topic</option></select></div>
+                <div class="form-row"><label class="form-label">Destination</label><input class="form-input" id="amq_dst" placeholder="order.events" /></div>
+                <div class="form-row"><label class="form-label">Ack 模式</label><select class="form-select" id="amq_ack"><option value="client">client</option><option value="auto">auto</option></select></div>
+                <div class="form-row"><label class="form-label">Selector 过滤</label><input class="form-input" id="amq_selector" placeholder="level='ERROR'" /></div>
+                <div class="form-row"><label class="form-label">TLS 加密</label><select class="form-select" id="amq_tls"><option value="false">关闭</option><option value="true">开启</option></select></div>
+              </div>
+            </div>
+
+            <div class="form-row mt-3"><div class="form-label">步骤 4 · 限流配额</div></div>
+            <div class="grid grid-cols-2">
+              <div class="form-row">
+                <label class="form-label">限流 / 秒 (rate_limit_per_sec)</label>
+                <input class="form-input" id="ep_rate_limit" value="5000" type="number" />
+                <div class="form-hint">超过此速率的写入将被丢弃并计数到"今日限流次数"</div>
+              </div>
+              <div class="form-row">
+                <label class="form-label">配额 GB / 日 (daily_quota_gb)</label>
+                <input class="form-input" id="ep_quota" value="50" type="number" />
+                <div class="form-hint">超过当日配额后接入点自动进入限流状态</div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="testCreateConnection()">
+              <i data-lucide="plug-zap"></i> 测试连接
+            </button>
+            <button class="btn btn-ghost" onclick="closeCreateEndpoint()">取消</button>
+            <button class="btn btn-primary" onclick="createEndpoint()">
+              <i data-lucide="check"></i> 创建
+            </button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  /* ---------- source selection ---------- */
+  function selectSource(src) {
+    selectedSource = src;
+    document.querySelectorAll("#sourcePills .source-pill").forEach(function (p) { p.classList.remove("active"); });
+    const pills = document.querySelectorAll("#sourcePills .source-pill");
+    const map = { http: 0, sdk: 1, kafka: 2, rabbitmq: 3, redis: 4, activemq: 5 };
+    if (pills[map[src]]) pills[map[src]].classList.add("active");
+    document.querySelectorAll(".source-config").forEach(function (el) { el.style.display = "none"; });
+    const target = document.getElementById("src_" + src);
+    if (target) target.style.display = "block";
+  }
+
+  /* ---------- modal control ---------- */
+  function openCreateEndpoint() { document.getElementById("endpointModal").classList.add("show"); }
+  function closeCreateEndpoint() { document.getElementById("endpointModal").classList.remove("show"); }
+
+  function collectConfig() {
+    const src = selectedSource;
+    const config = { host: "", port: "" };
+    const val = function (id) { const el = document.getElementById(id); return el ? el.value : ""; };
+    if (src === "kafka") {
+      config.host = (val("kafka_brokers") || "").split("\n")[0] || "";
+      config.brokers = val("kafka_brokers");
+      config.topic_pattern = val("kafka_topic_pattern");
+      config.consumer_group = val("kafka_group");
+      config.sasl_mechanism = val("kafka_sasl");
+      config.username = val("kafka_user");
+      config.tls = val("kafka_tls") === "true";
+      config.auto_offset_reset = val("kafka_offset");
+    } else if (src === "rabbitmq") {
+      config.host = val("rmq_host");
+      config.port = val("rmq_port");
+      config.vhost = val("rmq_vhost");
+      config.queue = val("rmq_queue");
+      config.exchange = val("rmq_exchange");
+      config.exchange_type = val("rmq_exchange_type");
+    } else if (src === "redis") {
+      config.host = val("redis_dsn");
+      config.mode = val("redis_mode");
+      config.stream_key = val("redis_stream_key");
+    } else if (src === "activemq") {
+      config.host = val("amq_host");
+      config.port = val("amq_port");
+      config.destination = val("amq_dst");
+    } else if (src === "http" || src === "sdk") {
+      config.host = "ingest.easylog.dev";
+    }
+    return config;
+  }
+
+  async function testCreateConnection() {
+    const config = collectConfig();
+    showToast("正在测试连接…", "info");
+    const res = await MockAPI.testConnection(selectedSource, config);
+    showToast(res.message, res.success ? "success" : "error");
+  }
+
+  async function testEndpoint(uuid) {
+    const ep = endpoints.find(function (e) { return e.uuid === uuid; });
+    if (!ep) return;
+    showToast("正在测试连接…", "info");
+    const res = await MockAPI.testConnection(ep.source_type, { host: ep.app_id });
+    showToast("[" + ep.name + "] " + res.message, res.success ? "success" : "error");
+  }
+
+  function openEditEndpoint(uuid) { showToast("编辑接入点（原型仅展示）", "info"); }
+
+  function rotateSecret(uuid) {
+    const ep = endpoints.find(function (e) { return e.uuid === uuid; });
+    if (!ep) return;
+    if (confirm("确认轮换 [" + ep.name + "] 的 AppSecret？")) showToast("已轮换 secret（mock）", "success");
+  }
+
+  function deleteEndpoint(uuid) {
+    const ep = endpoints.find(function (e) { return e.uuid === uuid; });
+    if (!ep) return;
+    if (confirm("确认删除接入点 [" + ep.name + "]？")) {
+      endpoints = endpoints.filter(function (e) { return e.uuid !== uuid; });
+      renderShell();
+      showToast("已删除", "success");
+    }
+  }
+
+  function createEndpoint() {
+    const name = document.getElementById("ep_name").value || "未命名接入点";
+    endpoints.push({
+      uuid: "ep_new_" + Math.random().toString(36).slice(2, 8),
+      workspace_uuid: "ws_acme_prod",
+      topic_uuid: document.getElementById("ep_topic").value,
+      name: name,
+      source_type: selectedSource,
+      source_type_label: selectedSource.toUpperCase(),
+      app_id: "app_" + Math.random().toString(36).slice(2, 8),
+      app_secret_masked: "sec_************",
+      rate_limit_per_sec: +document.getElementById("ep_rate_limit").value,
+      daily_quota_gb: +document.getElementById("ep_quota").value,
+      status: "active",
+      last_active: new Date().toISOString().replace("T", " ").slice(0, 19),
+      ingest_count_today: 0
+    });
+    closeCreateEndpoint();
+    renderShell();
+    showToast("接入点已创建（mock）", "success");
+  }
+
+  /* ---------- boot ---------- */
+  (async function () {
+    endpoints = await MockAPI.listEndpoints();
+    topics = await MockAPI.listTopics();
+    renderShell();
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 系统设置</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+  <script src="assets/mock.js"></script>
+  <script src="assets/charts.js"></script>
+  <script>
+    /* ---------- Toast helper ---------- */
+    function showToast(message) {
+      let toast = document.getElementById('toast-overlay');
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast-overlay';
+        toast.className = 'modal-overlay';
+        toast.style.alignItems = 'center';
+        toast.style.justifyContent = 'center';
+        toast.style.background = 'rgba(0,0,0,0.3)';
+        document.body.appendChild(toast);
+      }
+      toast.innerHTML = `
+        <div style="background:var(--bg-surface);border:1px solid var(--border-base);
+                    border-radius:var(--radius-lg);padding:var(--space-4) var(--space-5);
+                    box-shadow:var(--shadow-lg);min-width:240px;text-align:center;">
+          <div style="font-size:var(--text-md);color:var(--text-primary);">${message}</div>
+        </div>`;
+      toast.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    /* ---------- State ---------- */
+    let activeSubTab = 'general';
+
+    const SUB_TABS = [
+      { key: 'general', label: '通用', icon: 'settings-2' },
+      { key: 'storage', label: '存储引擎', icon: 'database' },
+      { key: 'security', label: '接入安全', icon: 'shield' },
+      { key: 'backup', label: '备份归档', icon: 'archive' },
+      { key: 'audit', label: '审计日志', icon: 'scroll-text' },
+      { key: 'about', label: '关于', icon: 'info' },
+    ];
+
+    function initPage() {
+      renderPage();
+    }
+
+    function renderPage() {
+      const mainHTML = `
+        <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
+          <div style="width:200px;flex-shrink:0;background:var(--bg-surface);border:1px solid var(--border-base);border-radius:var(--radius-lg);padding:var(--space-2);">
+            ${SUB_TABS.map(t => `
+              <div class="nav-link ${activeSubTab === t.key ? 'active' : ''}"
+                   style="cursor:pointer;border-radius:var(--radius-md);padding:0 var(--space-3);margin-bottom:2px;"
+                   onclick="switchSubTab('${t.key}')">
+                <i data-lucide="${t.icon}" style="width:14px;height:14px;"></i>
+                <span>${t.label}</span>
+              </div>
+            `).join('')}
+          </div>
+          <div style="flex:1;min-width:0;">
+            ${renderSubTab()}
+          </div>
+        </div>
+
+        <div style="position:fixed;bottom:0;left:220px;right:0;background:var(--bg-surface);border-top:1px solid var(--border-base);padding:var(--space-3) var(--space-5);display:flex;justify-content:flex-end;gap:var(--space-2);z-index:50;">
+          <button class="btn btn-ghost" onclick="discardChanges()">放弃修改</button>
+          <button class="btn btn-primary" onclick="saveSettings()"><i data-lucide="save"></i>保存设置</button>
+        </div>
+        <div style="height:60px;"></div>
+      `;
+
+      EasyLogUI.render({
+        activeNavKey: 'settings',
+        pageTitle: '系统设置',
+        breadcrumbHTML: '<a href="index.html">概览</a><span class="breadcrumb-sep">/</span><span>管理</span><span class="breadcrumb-sep">/</span><span>系统设置</span>',
+        actionsHTML: '',
+        mainHTML
+      });
+      lucide.createIcons();
+    }
+
+    function renderSubTab() {
+      switch (activeSubTab) {
+        case 'general': return renderGeneral();
+        case 'storage': return renderStorage();
+        case 'security': return renderSecurity();
+        case 'backup': return renderBackup();
+        case 'audit': return renderAudit();
+        case 'about': return renderAbout();
+        default: return '';
+      }
+    }
+
+    /* ---------- General ---------- */
+    function renderGeneral() {
+      return `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">通用设置</div>
+              <div class="card-subtitle">站点名称、保留策略、主题与时区</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2">
+            <div class="form-row">
+              <label class="form-label">站点名称</label>
+              <input class="form-input" id="set-site-name" value="EasyLog" />
+            </div>
+            <div class="form-row">
+              <label class="form-label">默认保留天数</label>
+              <input class="form-input" id="set-retention" type="number" value="30" />
+              <div class="form-hint">新建主题的默认日志保留期</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">默认主题</label>
+              <div class="source-pill-group">
+                <div class="source-pill active" onclick="toggleTheme(this, 'light')">
+                  <i data-lucide="sun"></i> 浅色
+                </div>
+                <div class="source-pill" onclick="toggleTheme(this, 'dark')">
+                  <i data-lucide="moon"></i> 深色
+                </div>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">时区</label>
+              <select class="form-select" id="set-tz">
+                <option value="Asia/Shanghai" selected>Asia/Shanghai (UTC+8)</option>
+                <option value="UTC">UTC</option>
+                <option value="America/Los_Angeles">America/Los_Angeles (UTC-8)</option>
+                <option value="Europe/London">Europe/London (UTC+0)</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">语言</label>
+              <select class="form-select" id="set-lang">
+                <option value="zh-CN" selected>简体中文</option>
+                <option value="en-US">English</option>
+                <option value="ja-JP">日本語</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">默认环境</label>
+              <select class="form-select" id="set-env">
+                <option value="prod" selected>生产 (PROD)</option>
+                <option value="staging">预发 (Staging)</option>
+                <option value="dev">开发 (Dev)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function toggleTheme(el, theme) {
+      const parent = el.parentElement;
+      parent.querySelectorAll('.source-pill').forEach(p => p.classList.remove('active'));
+      el.classList.add('active');
+      showToast('主题已切换为 ' + (theme === 'light' ? '浅色' : '深色'));
+    }
+
+    /* ---------- Storage Engine ---------- */
+    let storageEngine = 'elasticsearch';
+    function renderStorage() {
+      const engines = [
+        { key: 'elasticsearch', label: 'Elasticsearch', desc: '默认引擎，全文检索能力最强，资源消耗较高', icon: 'database' },
+        { key: 'openobserve', label: 'OpenObserve', desc: '轻量级 ELK 替代，Rust 编写，存储成本更低', icon: 'box' },
+        { key: 'quickwit', label: 'Quickwit', desc: '云原生搜索引擎，对象存储原生支持', icon: 'zap' },
+      ];
+      const fields = {
+        elasticsearch: { host: 'es-cluster.easylog.internal', port: '9200', auth: 'basic', index_pattern: 'easylog-*' },
+        openobserve: { host: 'oo-cluster.easylog.internal', port: '5080', auth: 'token', index_pattern: 'easylog-stream' },
+        quickwit: { host: 'qw-cluster.easylog.internal', port: '7280', auth: 'none', index_pattern: 'easylog-index' },
+      };
+      const cfg = fields[storageEngine];
+      return `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">存储引擎</div>
+              <div class="card-subtitle">选择 EasyLog 的底层日志存储与检索引擎</div>
+            </div>
+          </div>
+          <div class="source-pill-group mb-4">
+            ${engines.map(e => `
+              <div class="source-pill ${storageEngine === e.key ? 'active' : ''}"
+                   style="flex:1;flex-direction:column;align-items:flex-start;gap:4px;padding:var(--space-3);"
+                   onclick="switchEngine('${e.key}')">
+                <div class="flex items-center gap-2">
+                  <i data-lucide="${e.icon}" style="width:16px;height:16px;"></i>
+                  <span style="font-weight:600;">${e.label}</span>
+                </div>
+                <div class="text-xs text-muted" style="line-height:1.5;">${e.desc}</div>
+              </div>
+            `).join('')}
+          </div>
+
+          <div class="grid grid-cols-2">
+            <div class="form-row">
+              <label class="form-label">主机地址</label>
+              <input class="form-input" value="${cfg.host}" />
+            </div>
+            <div class="form-row">
+              <label class="form-label">端口</label>
+              <input class="form-input" type="number" value="${cfg.port}" />
+            </div>
+            <div class="form-row">
+              <label class="form-label">认证方式</label>
+              <select class="form-select">
+                <option ${cfg.auth === 'basic' ? 'selected' : ''} value="basic">Basic Auth</option>
+                <option ${cfg.auth === 'token' ? 'selected' : ''} value="token">Token</option>
+                <option ${cfg.auth === 'none' ? 'selected' : ''} value="none">无认证</option>
+                <option value="mtls">mTLS</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">Index Pattern</label>
+              <input class="form-input cell-mono" value="${cfg.index_pattern}" />
+              <div class="form-hint">匹配底层索引的命名模式</div>
+            </div>
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">连接测试</label>
+              <button class="btn btn-secondary" onclick="testStorageConn()">
+                <i data-lucide="plug" style="width:14px;height:14px;"></i>测试连接
+              </button>
+              <div class="form-hint" id="conn-result"></div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function switchEngine(key) {
+      storageEngine = key;
+      renderPage();
+    }
+
+    async function testStorageConn() {
+      const res = document.getElementById('conn-result');
+      if (res) res.textContent = '测试中...';
+      const r = await MockAPI.testConnection(storageEngine, { host: 'cluster.internal' });
+      if (res) res.textContent = r.message;
+      showToast(r.message);
+    }
+
+    /* ---------- Security ---------- */
+    function renderSecurity() {
+      return `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">接入安全</div>
+              <div class="card-subtitle">IP 白名单、Token 策略、HTTPS、限流</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2">
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">IP 白名单 (CIDR)</label>
+              <textarea class="form-textarea" rows="5" style="font-family:var(--font-mono);"
+                placeholder="0.0.0.0/0&#10;10.0.0.0/8&#10;192.168.1.0/24">0.0.0.0/0
+10.0.0.0/8
+192.168.1.0/24</textarea>
+              <div class="form-hint">每行一个 CIDR；留空表示允许所有来源</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">Token 默认有效期 (天)</label>
+              <input class="form-input" type="number" value="90" />
+              <div class="form-hint">新建接入点 Token 的默认过期天数</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">Rate Limit 默认值 (条/秒)</label>
+              <input class="form-input" type="number" value="5000" />
+            </div>
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">强制 HTTPS</label>
+              <div class="flex items-center gap-3">
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 启用强制 HTTPS（拒绝 HTTP 请求并自动重定向）
+                </label>
+              </div>
+            </div>
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">内容审计</label>
+              <div class="flex items-center gap-3">
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 启用敏感词过滤（写入日志时检测 PII 与敏感字段）
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    /* ---------- Backup ---------- */
+    function renderBackup() {
+      return `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">备份归档</div>
+              <div class="card-subtitle">配置数据备份目标与频率</div>
+            </div>
+            <button class="btn btn-primary" onclick="triggerBackup()">
+              <i data-lucide="play" style="width:14px;height:14px;"></i>立即备份
+            </button>
+          </div>
+          <div class="grid grid-cols-2">
+            <div class="form-row">
+              <label class="form-label">备份目标</label>
+              <select class="form-select">
+                <option value="oss" selected>阿里云 OSS</option>
+                <option value="s3">AWS S3</option>
+                <option value="local">本地存储</option>
+                <option value="tos">火山引擎 TOS</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">备份频率</label>
+              <select class="form-select">
+                <option value="daily" selected>每日</option>
+                <option value="weekly">每周</option>
+                <option value="monthly">每月</option>
+                <option value="hourly">每小时</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">备份保留份数</label>
+              <input class="form-input" type="number" value="30" />
+              <div class="form-hint">超出保留数的旧备份将自动清理</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">备份时刻</label>
+              <select class="form-select">
+                <option value="00:00" selected>00:00</option>
+                <option value="03:00">03:00</option>
+                <option value="06:00">06:00</option>
+                <option value="12:00">12:00</option>
+              </select>
+            </div>
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">备份范围</label>
+              <div class="flex items-center gap-3" style="flex-wrap:wrap;">
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 工作空间配置
+                </label>
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 主题与索引配置
+                </label>
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 接入点与消费组
+                </label>
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" style="margin-right:8px;" /> 日志数据快照
+                </label>
+              </div>
+            </div>
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">最近备份</label>
+              <div class="flex items-center gap-3 text-sm">
+                <span class="badge badge-success">成功</span>
+                <span class="cell-muted">2026-09-12 00:00:00</span>
+                <span class="cell-muted text-xs">耗时 4m 23s · 大小 1.2 GB</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function triggerBackup() {
+      showToast('备份任务已触发，请稍候');
+    }
+
+    /* ---------- Audit ---------- */
+    function renderAudit() {
+      return `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">审计日志配置</div>
+              <div class="card-subtitle">操作审计的保留与导出策略</div>
+            </div>
+            <button class="btn btn-secondary" onclick="exportAuditLogs()">
+              <i data-lucide="download" style="width:14px;height:14px;"></i>导出审计日志
+            </button>
+          </div>
+          <div class="grid grid-cols-2">
+            <div class="form-row">
+              <label class="form-label">审计日志保留天数</label>
+              <input class="form-input" type="number" value="180" />
+              <div class="form-hint">超出保留期的审计记录将被归档或删除</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">审计日志存储</label>
+              <select class="form-select">
+                <option value="local" selected>本地存储</option>
+                <option value="oss">阿里云 OSS</option>
+                <option value="s3">AWS S3</option>
+              </select>
+            </div>
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">记录范围</label>
+              <div class="flex items-center gap-3" style="flex-wrap:wrap;">
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 用户登录/登出
+                </label>
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 资源创建/删除
+                </label>
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" checked style="margin-right:8px;" /> 配置变更
+                </label>
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" id="audit-query-log" style="margin-right:8px;" /> 查询日志 (查询语句、查询人)
+                </label>
+              </div>
+              <div class="form-hint">查询日志记录量较大，开启后会增加存储成本</div>
+            </div>
+            <div class="form-row" style="grid-column:span 2;">
+              <label class="form-label">告警推送</label>
+              <div class="flex items-center gap-3">
+                <label class="filter-item" style="cursor:pointer;">
+                  <input type="checkbox" style="margin-right:8px;" /> 异常操作告警（删除工作空间、修改安全配置等）
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function exportAuditLogs() {
+      showToast('审计日志导出任务已创建');
+    }
+
+    /* ---------- About ---------- */
+    function renderAbout() {
+      return `
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">关于 EasyLog</div>
+              <div class="card-subtitle">版本信息与社区资源</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:var(--space-3);">
+              <div class="sidebar-logo-mark" style="width:40px;height:40px;font-size:18px;">E</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-4">
+            <div class="card" style="background:var(--bg-elevated);">
+              <div class="stat-label">版本号</div>
+              <div class="stat-value" style="font-size:var(--text-xl);">v1.4.2</div>
+              <div class="text-xs text-muted mt-2">构建时间：2026-09-10 14:32:18</div>
+            </div>
+            <div class="card" style="background:var(--bg-elevated);">
+              <div class="stat-label">License</div>
+              <div class="stat-value" style="font-size:var(--text-xl);">Apache-2.0</div>
+              <div class="text-xs text-muted mt-2">开源协议，可自由使用与修改</div>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <h3 style="font-size:var(--text-md);margin-bottom:var(--space-3);">资源链接</h3>
+          <div class="grid grid-cols-2 gap-3">
+            <a href="https://github.com/easylog/easylog" target="_blank" class="card" style="display:flex;align-items:center;gap:var(--space-3);text-decoration:none;">
+              <i data-lucide="github" style="width:24px;height:24px;color:var(--text-primary);"></i>
+              <div>
+                <div style="font-weight:500;">开源仓库</div>
+                <div class="cell-muted text-xs">github.com/easylog/easylog</div>
+              </div>
+              <i data-lucide="external-link" style="width:14px;height:14px;color:var(--text-muted);margin-left:auto;"></i>
+            </a>
+            <a href="https://docs.easylog.dev" target="_blank" class="card" style="display:flex;align-items:center;gap:var(--space-3);text-decoration:none;">
+              <i data-lucide="book-open" style="width:24px;height:24px;color:var(--accent-primary);"></i>
+              <div>
+                <div style="font-weight:500;">官方文档</div>
+                <div class="cell-muted text-xs">docs.easylog.dev</div>
+              </div>
+              <i data-lucide="external-link" style="width:14px;height:14px;color:var(--text-muted);margin-left:auto;"></i>
+            </a>
+            <a href="https://easylog.slack.com" target="_blank" class="card" style="display:flex;align-items:center;gap:var(--space-3);text-decoration:none;">
+              <i data-lucide="message-circle" style="width:24px;height:24px;color:#2EBA68;"></i>
+              <div>
+                <div style="font-weight:500;">Slack 社区</div>
+                <div class="cell-muted text-xs">easylog.slack.com</div>
+              </div>
+              <i data-lucide="external-link" style="width:14px;height:14px;color:var(--text-muted);margin-left:auto;"></i>
+            </a>
+            <a href="https://discord.gg/easylog" target="_blank" class="card" style="display:flex;align-items:center;gap:var(--space-3);text-decoration:none;">
+              <i data-lucide="messages-square" style="width:24px;height:24px;color:#A625FF;"></i>
+              <div>
+                <div style="font-weight:500;">Discord 频道</div>
+                <div class="cell-muted text-xs">discord.gg/easylog</div>
+              </div>
+              <i data-lucide="external-link" style="width:14px;height:14px;color:var(--text-muted);margin-left:auto;"></i>
+            </a>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="card" style="background:var(--bg-elevated);">
+            <div class="card-subtitle" style="margin-bottom:var(--space-2);">致谢</div>
+            <div class="text-sm text-secondary">
+              EasyLog 基于 Elasticsearch / OpenObserve / Quickwit、ECharts、Lucide 等开源项目构建，
+              感谢开源社区的贡献。
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    /* ---------- Handlers ---------- */
+    function switchSubTab(key) {
+      activeSubTab = key;
+      renderPage();
+    }
+
+    function saveSettings() {
+      showToast('设置已保存');
+    }
+
+    function discardChanges() {
+      if (!confirm('确认放弃当前修改？')) return;
+      renderPage();
+      showToast('已恢复默认值');
+    }
+
+    initPage();
+  </script>
+</body>
+</html>

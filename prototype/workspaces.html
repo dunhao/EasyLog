@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 工作空间</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<script src="assets/mock.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+function showToast(msg, type) {
+  type = type || 'success';
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay show';
+  overlay.style.alignItems = 'flex-start';
+  overlay.style.paddingTop = '80px';
+  overlay.style.pointerEvents = 'none';
+  overlay.style.background = 'transparent';
+  overlay.style.backdropFilter = 'none';
+  var color = type === 'success' ? 'var(--success)' : 'var(--danger)';
+  var icon = type === 'success' ? 'check-circle' : 'alert-circle';
+  overlay.innerHTML =
+    '<div style="background:var(--bg-elevated);border:1px solid ' + color + ';border-radius:var(--radius-md);padding:12px 20px;box-shadow:var(--shadow-md);display:flex;align-items:center;gap:10px;font-size:var(--text-sm);">' +
+      '<i data-lucide="' + icon + '" style="color:' + color + ';width:18px;height:18px;"></i>' +
+      '<span>' + msg + '</span>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  lucide.createIcons();
+  setTimeout(function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 2000);
+}
+
+EasyLogUI.render({
+  activeNavKey: 'workspaces',
+  pageTitle: '工作空间',
+  breadcrumbHTML: '<a href="index.html">EasyLog</a><span class="breadcrumb-sep">/</span><span>日志管理</span><span class="breadcrumb-sep">/</span><span>工作空间</span>',
+  actionsHTML: '<button class="btn btn-primary btn-sm" id="btn-new-ws"><i data-lucide="plus"></i>新建工作空间</button>',
+  mainHTML:
+    '<div class="card mb-4" style="display:flex;align-items:center;gap:12px;padding:12px 16px;">' +
+      '<div style="width:36px;height:36px;border-radius:var(--radius-md);background:linear-gradient(135deg,#4F7CFF,#A625FF);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;">A</div>' +
+      '<div>' +
+        '<div style="font-weight:600;font-size:var(--text-md);">Acme Inc. · Pro Plan</div>' +
+        '<div class="text-xs text-muted">已用 450GB / 1TB (45%) · 订阅续费 2026-12-31</div>' +
+      '</div>' +
+      '<div class="flex-1"></div>' +
+      '<span class="badge badge-success">PRO</span>' +
+      '<a href="usage.html" class="btn btn-ghost btn-sm"><i data-lucide="activity"></i>用量详情</a>' +
+    '</div>' +
+    '<div class="flex items-center justify-between mb-3">' +
+      '<div class="flex gap-2">' +
+        '<button class="btn btn-ghost btn-sm" id="btn-view-table"><i data-lucide="table"></i>表格</button>' +
+        '<button class="btn btn-ghost btn-sm" id="btn-view-cards"><i data-lucide="layout-grid"></i>卡片</button>' +
+      '</div>' +
+      '<div class="text-xs text-muted" id="ws-count">共 0 个工作空间</div>' +
+    '</div>' +
+    '<div id="ws-table-view">' +
+      '<div class="table-wrap"><table class="tbl">' +
+        '<thead><tr>' +
+          '<th>名称</th><th>主题数</th><th>接入点</th><th>今日写入 GB</th><th>今日查询</th><th>活跃告警</th><th>保留天数</th><th>状态</th><th>创建时间</th><th>操作</th>' +
+        '</tr></thead>' +
+        '<tbody id="ws-table-body"><tr><td colspan="10" class="cell-muted" style="text-align:center;padding:24px;">加载中...</td></tr></tbody>' +
+      '</table></div>' +
+    '</div>' +
+    '<div id="ws-cards-view" style="display:none;" class="grid grid-cols-3"></div>' +
+    '<div class="modal-overlay" id="ws-modal">' +
+      '<div class="modal">' +
+        '<div class="modal-header">' +
+          '<div class="modal-title">新建工作空间</div>' +
+          '<button class="modal-close" id="ws-modal-close"><i data-lucide="x"></i></button>' +
+        '</div>' +
+        '<div class="modal-body">' +
+          '<div class="form-row"><label class="form-label">名称<span class="req">*</span></label>' +
+            '<input type="text" class="form-input" id="ws-name" placeholder="如：Acme 生产" /></div>' +
+          '<div class="form-row"><label class="form-label">描述</label>' +
+            '<textarea class="form-textarea" id="ws-desc" placeholder="工作空间用途..." rows="3"></textarea></div>' +
+          '<div class="grid grid-cols-2">' +
+            '<div class="form-row"><label class="form-label">保留天数</label>' +
+              '<input type="number" class="form-input" id="ws-retention" value="30" min="1" /></div>' +
+            '<div class="form-row"><label class="form-label">分区数</label>' +
+              '<input type="number" class="form-input" id="ws-partitions" value="3" min="1" /></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="modal-footer">' +
+          '<button class="btn btn-secondary" id="ws-cancel">取消</button>' +
+          '<button class="btn btn-primary" id="ws-submit"><i data-lucide="check"></i>创建</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>'
+});
+
+var wsList = [];
+var currentView = 'table';
+
+function activateToggle(active, inactive) {
+  active.style.background = 'var(--accent-bg)';
+  active.style.color = 'var(--accent-primary)';
+  inactive.style.background = '';
+  inactive.style.color = '';
+}
+
+function renderWsTable() {
+  document.getElementById('ws-count').textContent = '共 ' + wsList.length + ' 个工作空间';
+  document.getElementById('ws-table-body').innerHTML = wsList.map(function (w) {
+    return '<tr>' +
+      '<td><a href="topics.html" style="font-weight:500;">' + w.name + '</a><div class="text-xs text-muted cell-mono">' + w.uuid + '</div></td>' +
+      '<td>' + w.topics + '</td>' +
+      '<td>' + w.endpoints + '</td>' +
+      '<td class="cell-mono">' + w.ingest_gb_today + ' GB</td>' +
+      '<td class="cell-mono">' + EasyLogUI.formatNumber(w.query_count_today) + '</td>' +
+      '<td>' + (w.alerts_active > 0 ? '<span class="badge badge-danger">' + w.alerts_active + '</span>' : '<span class="text-muted">0</span>') + '</td>' +
+      '<td>' + w.retention_days + ' 天</td>' +
+      '<td>' + EasyLogUI.statusBadge(w.status) + '</td>' +
+      '<td class="cell-muted">' + w.created_at + '</td>' +
+      '<td><div class="flex gap-1">' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" title="详情" onclick="location.href=\'topics.html\'"><i data-lucide="eye"></i></button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" title="编辑" onclick="showToast(\'编辑功能（原型未实现）\')"><i data-lucide="pencil"></i></button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" title="删除" onclick="showToast(\'已删除（原型模拟）\')"><i data-lucide="trash-2"></i></button>' +
+      '</div></td>' +
+    '</tr>';
+  }).join('');
+  lucide.createIcons();
+}
+
+function renderWsCards() {
+  document.getElementById('ws-count').textContent = '共 ' + wsList.length + ' 个工作空间';
+  document.getElementById('ws-cards-view').innerHTML = wsList.map(function (w) {
+    return '<div class="card" style="display:flex;flex-direction:column;gap:12px;">' +
+      '<div class="flex items-center justify-between">' +
+        '<div><div style="font-weight:600;font-size:var(--text-md);">' + w.name + '</div>' +
+        '<div class="text-xs text-muted cell-mono">' + w.uuid + '</div></div>' +
+        EasyLogUI.statusBadge(w.status) +
+      '</div>' +
+      '<div class="grid grid-cols-2" style="gap:8px;">' +
+        '<div class="stat-card" style="padding:10px 12px;"><div class="stat-label">主题</div><div style="font-size:var(--text-lg);font-weight:600;">' + w.topics + '</div></div>' +
+        '<div class="stat-card" style="padding:10px 12px;"><div class="stat-label">接入点</div><div style="font-size:var(--text-lg);font-weight:600;">' + w.endpoints + '</div></div>' +
+        '<div class="stat-card" style="padding:10px 12px;"><div class="stat-label">今日写入</div><div style="font-size:var(--text-lg);font-weight:600;">' + w.ingest_gb_today + ' <span class="text-xs text-muted">GB</span></div></div>' +
+        '<div class="stat-card" style="padding:10px 12px;"><div class="stat-label">今日查询</div><div style="font-size:var(--text-lg);font-weight:600;">' + EasyLogUI.formatNumber(w.query_count_today) + '</div></div>' +
+      '</div>' +
+      '<div class="flex items-center justify-between text-xs">' +
+        '<span class="text-muted">保留 ' + w.retention_days + ' 天 · 创建于 ' + w.created_at + '</span>' +
+        (w.alerts_active > 0 ? '<span class="badge badge-danger">' + w.alerts_active + ' 告警</span>' : '<span class="badge badge-success">无告警</span>') +
+      '</div>' +
+      '<div class="flex gap-2">' +
+        '<button class="btn btn-secondary btn-sm flex-1" onclick="location.href=\'topics.html\'"><i data-lucide="eye"></i>详情</button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" onclick="showToast(\'编辑功能（原型未实现）\')"><i data-lucide="pencil"></i></button>' +
+        '<button class="btn btn-ghost btn-sm btn-icon-only" onclick="showToast(\'已删除（原型模拟）\')"><i data-lucide="trash-2"></i></button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+  lucide.createIcons();
+}
+
+function loadWorkspaces() {
+  MockAPI.listWorkspaces().then(function (list) {
+    wsList = list;
+    if (currentView === 'table') renderWsTable(); else renderWsCards();
+  });
+}
+
+var btnTable = document.getElementById('btn-view-table');
+var btnCards = document.getElementById('btn-view-cards');
+activateToggle(btnTable, btnCards);
+
+btnTable.addEventListener('click', function () {
+  currentView = 'table';
+  document.getElementById('ws-table-view').style.display = '';
+  document.getElementById('ws-cards-view').style.display = 'none';
+  activateToggle(btnTable, btnCards);
+  renderWsTable();
+});
+btnCards.addEventListener('click', function () {
+  currentView = 'cards';
+  document.getElementById('ws-table-view').style.display = 'none';
+  document.getElementById('ws-cards-view').style.display = '';
+  activateToggle(btnCards, btnTable);
+  renderWsCards();
+});
+
+var wsModal = document.getElementById('ws-modal');
+document.getElementById('btn-new-ws').addEventListener('click', function () { wsModal.classList.add('show'); });
+document.getElementById('ws-modal-close').addEventListener('click', function () { wsModal.classList.remove('show'); });
+document.getElementById('ws-cancel').addEventListener('click', function () { wsModal.classList.remove('show'); });
+wsModal.addEventListener('click', function (e) { if (e.target === wsModal) wsModal.classList.remove('show'); });
+document.getElementById('ws-submit').addEventListener('click', function () {
+  var name = document.getElementById('ws-name').value.trim();
+  if (!name) { showToast('请填写名称', 'error'); return; }
+  MockAPI.createWorkspace(name).then(function () {
+    wsModal.classList.remove('show');
+    document.getElementById('ws-name').value = '';
+    document.getElementById('ws-desc').value = '';
+    document.getElementById('ws-retention').value = 30;
+    document.getElementById('ws-partitions').value = 3;
+    showToast('工作空间 "' + name + '" 创建成功');
+    loadWorkspaces();
+  });
+});
+
+loadWorkspaces();
+</script>
+</body>
+</html>

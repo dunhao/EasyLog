@@ -1,0 +1,40 @@
+EasyLog
+Copyright 2026 The EasyLog Authors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file in the root of this distribution for the full
+license text.
+
+--------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------
+
+This product depends on components distributed under their own licenses.
+Their licenses are not changed by this NOTICE; refer to each project for
+the authoritative text.
+
+Backend (services/admin) — PHP / Composer:
+  laravel/framework, laravel/octane, laravel/sanctum, laravel/reverb
+      MIT — https://github.com/laravel/framework
+  spatie/laravel-permission
+      MIT — https://github.com/spatie/laravel-permission
+  elasticsearch/elasticsearch
+      Apache-2.0 — https://github.com/elastic/elasticsearch-php
+  predis/predis
+      MIT — https://github.com/predis/predis
+  stomp-php/stomp-php
+      MIT — https://github.com/stomp-php/stomp-php
+
+Frontend (frontend/) — npm:
+  vue, element-plus, echarts, pinia, vue-router, vite
+      MIT — see frontend/package.json for the authoritative list.
+
+--------------------------------------------------------------------------
+Trademarks
+--------------------------------------------------------------------------
+
+"EasyLog" and the EasyLog logo are not granted under this license.
+The Apache License, Version 2.0 does not grant permission to use the trade
+names, trademarks, service marks, or product names of the Licensor, except
+as required for reasonable and customary use in describing the origin of
+the Work.

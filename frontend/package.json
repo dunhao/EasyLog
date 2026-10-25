@@ -1,0 +1,34 @@
+{
+  "name": "easylog-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --port 9517",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "vue": "^3.4.21",
+    "vue-router": "^4.3.0",
+    "pinia": "^2.1.7",
+    "element-plus": "^2.6.2",
+    "@element-plus/icons-vue": "^2.3.1",
+    "echarts": "^5.5.0",
+    "axios": "^1.6.8",
+    "dayjs": "^1.11.10",
+    "lodash-es": "^4.17.12"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "@types/node": "^20.11.30",
+    "@types/lodash-es": "^4.17.12",
+    "typescript": "^5.4.3",
+    "vue-tsc": "^2.0.7",
+    "vite": "^5.2.6",
+    "unplugin-auto-import": "^0.17.5",
+    "unplugin-vue-components": "^0.26.0",
+    "sass": "^1.72.0"
+  }
+}

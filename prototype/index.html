@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 仪表盘</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<script src="assets/mock.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+(function () {
+  // 24h hourly labels
+  var now = new Date();
+  var hours = [];
+  for (var i = 23; i >= 0; i--) {
+    var d = new Date(now.getTime() - i * 3600 * 1000);
+    hours.push(String(d.getHours()).padStart(2, '0') + ':00');
+  }
+  var ingestData = hours.map(function (_, i) {
+    return Math.round(9500 + Math.sin(i / 2.5) * 2800 + Math.random() * 1200);
+  });
+  var services = ['order-service', 'payment-service', 'user-action', 'nginx-access', 'app-errors'];
+  var serviceBases = [3200, 1800, 5200, 6800, 280];
+  var serviceSeries = services.map(function (s, i) {
+    return {
+      name: s,
+      data: hours.map(function (_, j) {
+        return Math.round(serviceBases[i] + Math.sin(j / 1.8 + i) * serviceBases[i] * 0.25 + Math.random() * serviceBases[i] * 0.15);
+      })
+    };
+  });
+  var levelPieData = [
+    { name: 'INFO', value: 62 },
+    { name: 'ERROR', value: 18 },
+    { name: 'WARN', value: 12 },
+    { name: 'DEBUG', value: 5 },
+    { name: 'FATAL', value: 2 },
+    { name: 'TRACE', value: 1 }
+  ];
+
+  EasyLogUI.render({
+    activeNavKey: 'dashboard',
+    pageTitle: '仪表盘',
+    breadcrumbHTML: '<a href="index.html">EasyLog</a><span class="breadcrumb-sep">/</span><span>概览</span>',
+    actionsHTML: '<button class="btn btn-secondary btn-sm" onclick="location.reload()"><i data-lucide="refresh-cw"></i>刷新</button><button class="btn btn-secondary btn-sm" onclick="alert(\'导出报表（原型未实现）\')"><i data-lucide="download"></i>导出报表</button>',
+    mainHTML:
+      '<div class="grid grid-cols-4 mb-5">' +
+        EasyLogUI.statCard('写入 QPS (AVG)', '12.4k/s', '+8.2% vs 昨日', 'trend-up', '峰值 18.2k/s @ 14:30') +
+        EasyLogUI.statCard('查询 QPS (AVG)', '680/s', '-2.1% vs 昨日', 'trend-down', 'P95 延迟 124ms') +
+        EasyLogUI.statCard('存储量', '450 GB', '+5 GB / 24h', 'trend-up', '已用 45% / 1TB 配额') +
+        EasyLogUI.statCard('活跃告警', '5', '', 'trend-flat', '2 critical · 24h 共 12 次') +
+      '</div>' +
+      '<div class="card mb-5">' +
+        '<div class="card-header">' +
+          '<div><div class="card-title">近 24h 写入趋势</div><div class="card-subtitle">全租户 · 单位 条/秒</div></div>' +
+          '<div class="flex gap-2">' +
+            '<button class="btn btn-ghost btn-sm">1h</button>' +
+            '<button class="btn btn-ghost btn-sm">6h</button>' +
+            '<button class="btn btn-ghost btn-sm" style="background:var(--accent-bg);color:var(--accent-primary);">24h</button>' +
+            '<button class="btn btn-ghost btn-sm">7d</button>' +
+          '</div>' +
+        '</div>' +
+        '<div id="chart-ingest" style="width:100%;height:280px;"></div>' +
+      '</div>' +
+      '<div class="grid grid-cols-2 mb-5">' +
+        '<div class="card">' +
+          '<div class="card-header"><div><div class="card-title">各服务写入 QPS</div><div class="card-subtitle">TOP 5 服务</div></div></div>' +
+          '<div id="chart-services" style="width:100%;height:280px;"></div>' +
+        '</div>' +
+        '<div class="card">' +
+          '<div class="card-header"><div><div class="card-title">日志级别分布</div><div class="card-subtitle">近 1h 全量</div></div></div>' +
+          '<div id="chart-level-pie" style="width:100%;height:280px;"></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card mb-5">' +
+        '<div class="card-header">' +
+          '<div><div class="card-title">TOP 5 主题（按今日写入量）</div><div class="card-subtitle">实时统计 · 每分钟刷新</div></div>' +
+          '<a href="topics.html" class="btn btn-ghost btn-sm">查看全部<i data-lucide="arrow-right"></i></a>' +
+        '</div>' +
+        '<div class="table-wrap"><table class="tbl">' +
+          '<thead><tr><th>主题名</th><th>所属工作空间</th><th>今日写入量</th><th>存储</th><th>字段数</th><th>状态</th></tr></thead>' +
+          '<tbody id="top-topics-body"><tr><td colspan="6" class="cell-muted" style="text-align:center;padding:24px;">加载中...</td></tr></tbody>' +
+        '</table></div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-header">' +
+          '<div><div class="card-title">最近告警事件</div><div class="card-subtitle">实时告警流水</div></div>' +
+          '<a href="alerts.html" class="btn btn-ghost btn-sm">告警中心<i data-lucide="arrow-right"></i></a>' +
+        '</div>' +
+        '<div class="table-wrap"><table class="tbl">' +
+          '<thead><tr><th>触发时间</th><th>规则</th><th>级别</th><th>上下文</th><th>通知</th><th>状态</th></tr></thead>' +
+          '<tbody id="alert-events-body"><tr><td colspan="6" class="cell-muted" style="text-align:center;padding:24px;">加载中...</td></tr></tbody>' +
+        '</table></div>' +
+      '</div>'
+  });
+
+  // Charts init (DOM ready after render)
+  EasyLogCharts.ingestTrend(document.getElementById('chart-ingest'), {
+    labels: hours, data: ingestData, seriesName: '写入 QPS'
+  });
+  EasyLogCharts.multiLineChart(document.getElementById('chart-services'), {
+    labels: hours, series: serviceSeries
+  });
+  EasyLogCharts.levelPie(document.getElementById('chart-level-pie'), levelPieData);
+
+  // Top topics table
+  MockAPI.listTopics().then(function (topics) {
+    var wsMap = {};
+    MockData.workspaces.forEach(function (w) { wsMap[w.uuid] = w.name; });
+    topics.sort(function (a, b) { return b.ingest_count_today - a.ingest_count_today; });
+    var top5 = topics.slice(0, 5);
+    document.getElementById('top-topics-body').innerHTML = top5.map(function (t) {
+      return '<tr>' +
+        '<td class="cell-mono"><a href="topics.html">' + t.name + '</a></td>' +
+        '<td>' + (wsMap[t.workspace_uuid] || '—') + '</td>' +
+        '<td class="cell-mono">' + EasyLogUI.formatNumber(t.ingest_count_today) + '</td>' +
+        '<td class="cell-mono">' + t.storage_gb + ' GB</td>' +
+        '<td>' + t.fields_count + '</td>' +
+        '<td>' + EasyLogUI.statusBadge(t.status) + '</td>' +
+      '</tr>';
+    }).join('');
+    lucide.createIcons();
+  });
+
+  // Alert events table
+  MockAPI.listAlertEvents().then(function (events) {
+    var ruleMap = {};
+    MockData.alert_rules.forEach(function (r) { ruleMap[r.uuid] = r.name; });
+    var top = events.slice(0, 5);
+    var sevMap = { critical: ['badge-critical', '严重'], warning: ['badge-warning', '警告'], info: ['badge-info', '信息'] };
+    document.getElementById('alert-events-body').innerHTML = top.map(function (e) {
+      var sv = sevMap[e.severity] || ['badge-muted', e.severity];
+      return '<tr>' +
+        '<td class="cell-mono">' + e.fired_at + '</td>' +
+        '<td>' + (ruleMap[e.rule_uuid] || e.rule_uuid) + '</td>' +
+        '<td><span class="badge ' + sv[0] + '">' + sv[1] + '</span></td>' +
+        '<td class="cell-truncate">' + e.context + '</td>' +
+        '<td><span class="badge badge-muted">' + e.notify_status + '</span></td>' +
+        '<td>' + (e.resolved_at ? '<span class="badge badge-success">已恢复</span>' : '<span class="badge badge-danger">活动中</span>') + '</td>' +
+      '</tr>';
+    }).join('');
+    lucide.createIcons();
+  });
+})();
+</script>
+</body>
+</html>

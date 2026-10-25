@@ -1,0 +1,11 @@
+{
+    "name": "easylog/agent",
+    "description": "EasyLog 免依赖日志采集器：tail 项目日志目录（runtime/log 等）解析后批量推送到 EasyLog（lite/core/full 通用）",
+    "type": "project",
+    "license": "Apache-2.0",
+    "require": {
+        "php": ">=7.2",
+        "ext-json": "*"
+    },
+    "bin": ["easylog-agent"]
+}

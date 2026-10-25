@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 投递任务</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+<script src="assets/mock.js"></script>
+<script src="assets/charts.js"></script>
+<script>
+  /* ---------- state ---------- */
+  let shippingTasks = [];
+  let topics = [];
+  let selectedTarget = "oss";
+
+  /* ---------- helpers ---------- */
+  function showToast(message, type) {
+    type = type || "info";
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay show";
+    overlay.style.zIndex = 2000;
+    const color = type === "success" ? "var(--success)" : type === "error" ? "var(--danger)" : "var(--accent-primary)";
+    const icon = type === "success" ? "check-circle" : type === "error" ? "x-circle" : "info";
+    overlay.innerHTML = `
+      <div class="modal" style="max-width: 360px; text-align: center;">
+        <div class="modal-body">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:12px;">
+            <i data-lucide="${icon}" style="width:32px;height:32px;color:${color};"></i>
+            <div style="font-size: var(--text-sm);">${message}</div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    if (window.lucide) lucide.createIcons();
+    setTimeout(function () { overlay.remove(); }, 2000);
+  }
+
+  function topicName(uuid) {
+    const t = topics.find(function (x) { return x.uuid === uuid; });
+    return t ? t.name : "—";
+  }
+
+  function targetBadge(type) {
+    const map = { oss: "archive", file: "file-text", rabbitmq: "rabbit", kafka: "zap", redis: "database", activemq: "message-square", http: "globe" };
+    return `<span class="badge badge-info"><i data-lucide="${map[type] || "circle"}" style="width:10px;height:10px;"></i>${type.toUpperCase()}</span>`;
+  }
+
+  /* ---------- shell render ---------- */
+  function renderShell() {
+    const mainHTML = `
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>任务名</th>
+              <th>来源主题</th>
+              <th>目标类型</th>
+              <th>目标标签</th>
+              <th>过滤条件</th>
+              <th>状态</th>
+              <th>最近运行</th>
+              <th>已投递 GB</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${shippingTasks.map(function (s) {
+              return `
+                <tr>
+                  <td>${s.name}</td>
+                  <td>${topicName(s.topic_uuid)}</td>
+                  <td>${targetBadge(s.target_type)}</td>
+                  <td>${s.target_label}</td>
+                  <td><span class="cell-mono">${s.filter}</span></td>
+                  <td>${EasyLogUI.statusBadge(s.status)}</td>
+                  <td class="cell-muted">${s.last_run}</td>
+                  <td>${s.shipped_gb}</td>
+                  <td>
+                    <button class="btn btn-sm btn-secondary" onclick="runTask('${s.uuid}')" title="运行"><i data-lucide="play" style="width:12px;height:12px;"></i>运行</button>
+                    <button class="btn btn-sm btn-ghost" onclick="toggleTask('${s.uuid}')" title="${s.status === "active" ? "暂停" : "启用"}"><i data-lucide="${s.status === "active" ? "pause" : "play"}" style="width:12px;height:12px;"></i></button>
+                    <button class="btn btn-sm btn-ghost" onclick="showToast('编辑 ${s.name}（原型仅展示）', 'info')" title="编辑"><i data-lucide="pencil" style="width:12px;height:12px;"></i></button>
+                    <button class="btn btn-sm btn-ghost" onclick="showToast('查看运行日志（原型仅展示）', 'info')" title="日志"><i data-lucide="file-text" style="width:12px;height:12px;"></i></button>
+                    <button class="btn btn-sm btn-ghost" onclick="deleteTask('${s.uuid}')" title="删除"><i data-lucide="trash-2" style="width:12px;height:12px;"></i></button>
+                  </td>
+                </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+      ${renderCreateModal()}
+    `;
+    const actionsHTML = `
+      <button class="btn btn-primary" onclick="openCreateTask()">
+        <i data-lucide="plus"></i> 新建投递
+      </button>`;
+    EasyLogUI.render({
+      activeNavKey: "shipping",
+      pageTitle: "投递任务",
+      breadcrumbHTML: '<a href="workspaces.html">工作空间</a><span class="breadcrumb-sep">/</span>Acme 生产<span class="breadcrumb-sep">/</span>投递任务',
+      actionsHTML: actionsHTML,
+      mainHTML: mainHTML
+    });
+  }
+
+  /* ---------- create modal ---------- */
+  function renderCreateModal() {
+    return `
+      <div class="modal-overlay" id="taskModal">
+        <div class="modal modal-xl">
+          <div class="modal-header">
+            <div class="modal-title">新建投递任务</div>
+            <button class="modal-close" onclick="closeCreateTask()"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="grid grid-cols-2">
+              <div class="form-row">
+                <label class="form-label">任务名称<span class="req">*</span></label>
+                <input class="form-input" id="st_name" placeholder="例: 归档到 OSS" />
+              </div>
+              <div class="form-row">
+                <label class="form-label">来源主题<span class="req">*</span></label>
+                <select class="form-select" id="st_topic">
+                  ${topics.map(function (t) { return `<option value="${t.uuid}">${t.name}</option>`; }).join("")}
+                </select>
+              </div>
+              <div class="form-row">
+                <label class="form-label">目标类型<span class="req">*</span></label>
+                <select class="form-select" id="st_target_type" onchange="selectTarget(this.value)">
+                  <option value="oss">OSS</option>
+                  <option value="file">文件</option>
+                  <option value="rabbitmq">RabbitMQ</option>
+                  <option value="kafka">Kafka</option>
+                  <option value="redis">Redis</option>
+                  <option value="activemq">ActiveMQ</option>
+                  <option value="http">HTTP</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label class="form-label">起始时间</label>
+                <input class="form-input" type="datetime-local" id="st_start_time" value="2026-09-12T00:00" />
+              </div>
+            </div>
+
+            <div class="form-row mt-3"><div class="form-label">目标配置</div></div>
+
+            <!-- OSS -->
+            <div id="tgt_oss" class="target-config" style="display: ${selectedTarget === "oss" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">Endpoint</label><input class="form-input" id="oss_endpoint" placeholder="https://oss-cn-hangzhou.aliyuncs.com" /></div>
+                <div class="form-row"><label class="form-label">Bucket</label><input class="form-input" id="oss_bucket" placeholder="easylog-archive" /></div>
+                <div class="form-row"><label class="form-label">Prefix</label><input class="form-input" id="oss_prefix" placeholder="logs/" /></div>
+                <div class="form-row"><label class="form-label">Region</label><input class="form-input" id="oss_region" placeholder="cn-hangzhou" /></div>
+              </div>
+            </div>
+
+            <!-- File -->
+            <div id="tgt_file" class="target-config" style="display: ${selectedTarget === "file" ? "block" : "none"};">
+              <div class="form-row"><label class="form-label">文件路径</label><input class="form-input" id="file_path" placeholder="/data/easylog/archive/" /></div>
+              <div class="form-row"><label class="form-label">文件名模式</label><input class="form-input" id="file_pattern" placeholder="{topic}/{date}/{n}.log" /></div>
+            </div>
+
+            <!-- RabbitMQ -->
+            <div id="tgt_rabbitmq" class="target-config" style="display: ${selectedTarget === "rabbitmq" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">Host</label><input class="form-input" id="rmq_host" placeholder="rabbitmq.internal" /></div>
+                <div class="form-row"><label class="form-label">Port</label><input class="form-input" id="rmq_port" value="5672" /></div>
+                <div class="form-row"><label class="form-label">VHost</label><input class="form-input" id="rmq_vhost" placeholder="/" /></div>
+                <div class="form-row"><label class="form-label">用户名</label><input class="form-input" id="rmq_user" /></div>
+                <div class="form-row"><label class="form-label">密码</label><input class="form-input" type="password" id="rmq_pass" /></div>
+                <div class="form-row"><label class="form-label">Exchange</label><input class="form-input" id="rmq_exchange" /></div>
+                <div class="form-row"><label class="form-label">Routing Key</label><input class="form-input" id="rmq_routing_key" /></div>
+                <div class="form-row"><label class="form-label">Exchange Type</label><select class="form-select" id="rmq_exchange_type"><option value="direct">direct</option><option value="topic">topic</option><option value="fanout">fanout</option><option value="headers">headers</option></select></div>
+              </div>
+            </div>
+
+            <!-- Kafka -->
+            <div id="tgt_kafka" class="target-config" style="display: ${selectedTarget === "kafka" ? "block" : "none"};">
+              <div class="form-row"><label class="form-label">Brokers</label><textarea class="form-textarea" id="kf_brokers" rows="2" placeholder="kafka1:9092"></textarea></div>
+              <div class="form-row"><label class="form-label">Topic</label><input class="form-input" id="kf_topic" /></div>
+            </div>
+
+            <!-- Redis -->
+            <div id="tgt_redis" class="target-config" style="display: ${selectedTarget === "redis" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">DSN</label><input class="form-input" id="rd_dsn" placeholder="redis://host:6379/0" /></div>
+                <div class="form-row"><label class="form-label">Stream Key</label><input class="form-input" id="rd_key" /></div>
+              </div>
+            </div>
+
+            <!-- ActiveMQ -->
+            <div id="tgt_activemq" class="target-config" style="display: ${selectedTarget === "activemq" ? "block" : "none"};">
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">Host</label><input class="form-input" id="amq_host" /></div>
+                <div class="form-row"><label class="form-label">Port</label><input class="form-input" id="amq_port" value="61613" /></div>
+                <div class="form-row"><label class="form-label">Login</label><input class="form-input" id="amq_login" /></div>
+                <div class="form-row"><label class="form-label">Passcode</label><input class="form-input" type="password" id="amq_passcode" /></div>
+                <div class="form-row"><label class="form-label">Destination</label><input class="form-input" id="amq_dst" /></div>
+                <div class="form-row"><label class="form-label">Destination Type</label><select class="form-select" id="amq_dst_type"><option value="queue">queue</option><option value="topic">topic</option></select></div>
+              </div>
+            </div>
+
+            <!-- HTTP -->
+            <div id="tgt_http" class="target-config" style="display: ${selectedTarget === "http" ? "block" : "none"};">
+              <div class="form-row"><label class="form-label">URL</label><input class="form-input" id="http_url" placeholder="https://downstream/api/logs" /></div>
+              <div class="grid grid-cols-2">
+                <div class="form-row"><label class="form-label">Method</label><select class="form-select" id="http_method"><option value="POST">POST</option><option value="PUT">PUT</option></select></div>
+                <div class="form-row"><label class="form-label">Headers (JSON)</label><input class="form-input" id="http_headers" placeholder='{"Authorization":"Bearer ***"}' /></div>
+              </div>
+            </div>
+
+            <div class="form-row mt-3">
+              <label class="form-label">过滤条件</label>
+              <input class="form-input" id="st_filter" style="font-family: var(--font-mono);" placeholder="status>=400 或 level:ERROR" value="*" />
+              <div class="form-hint">支持主题字段过滤，"*" 表示全量</div>
+            </div>
+            <div class="form-row">
+              <label class="form-label">状态</label>
+              <select class="form-select" id="st_status">
+                <option value="active">启用</option>
+                <option value="paused">暂停</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeCreateTask()">取消</button>
+            <button class="btn btn-primary" onclick="createTask()"><i data-lucide="check"></i> 创建</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function selectTarget(t) {
+    selectedTarget = t;
+    document.querySelectorAll(".target-config").forEach(function (el) { el.style.display = "none"; });
+    const el = document.getElementById("tgt_" + t);
+    if (el) el.style.display = "block";
+  }
+
+  function openCreateTask() { document.getElementById("taskModal").classList.add("show"); }
+  function closeCreateTask() { document.getElementById("taskModal").classList.remove("show"); }
+
+  function createTask() {
+    const name = document.getElementById("st_name").value || "未命名任务";
+    const topic_uuid = document.getElementById("st_topic").value;
+    const filter = document.getElementById("st_filter").value || "*";
+    const status = document.getElementById("st_status").value;
+    const target_type = selectedTarget;
+    const labelMap = {
+      oss: "阿里云 OSS", file: "本地文件系统", rabbitmq: "下游 RabbitMQ",
+      kafka: "下游 Kafka", redis: "下游 Redis", activemq: "下游 ActiveMQ", http: "下游 HTTP 服务"
+    };
+    shippingTasks.unshift({
+      uuid: "ship_new_" + Math.random().toString(36).slice(2, 8),
+      workspace_uuid: "ws_acme_prod",
+      topic_uuid: topic_uuid,
+      name: name,
+      target_type: target_type,
+      target_label: labelMap[target_type] || target_type,
+      filter: filter,
+      status: status,
+      last_run: new Date().toISOString().replace("T", " ").slice(0, 19),
+      shipped_gb: 0
+    });
+    closeCreateTask();
+    renderShell();
+    showToast("任务已创建", "success");
+  }
+
+  function runTask(uuid) {
+    const t = shippingTasks.find(function (x) { return x.uuid === uuid; });
+    if (!t) return;
+    t.last_run = new Date().toISOString().replace("T", " ").slice(0, 19);
+    t.shipped_gb = +(t.shipped_gb + Math.random() * 0.5).toFixed(2);
+    renderShell();
+    showToast("[" + t.name + "] 已触发运行", "success");
+  }
+
+  function toggleTask(uuid) {
+    const t = shippingTasks.find(function (x) { return x.uuid === uuid; });
+    if (!t) return;
+    t.status = t.status === "active" ? "paused" : "active";
+    renderShell();
+    showToast("任务状态已切换", "success");
+  }
+
+  function deleteTask(uuid) {
+    const t = shippingTasks.find(function (x) { return x.uuid === uuid; });
+    if (!t) return;
+    if (confirm("确认删除任务 [" + t.name + "]？")) {
+      shippingTasks = shippingTasks.filter(function (x) { return x.uuid !== uuid; });
+      renderShell();
+      showToast("已删除", "success");
+    }
+  }
+
+  /* ---------- boot ---------- */
+  (async function () {
+    shippingTasks = await MockAPI.listShippingTasks();
+    topics = await MockAPI.listTopics();
+    renderShell();
+  })();
+</script>
+</body>
+</html>

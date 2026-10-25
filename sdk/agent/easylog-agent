@@ -1,0 +1,697 @@
+#!/usr/bin/env php
+<?php
+/**
+ * EasyLog Agent —— 免依赖单文件日志采集器（PHP 7.2+，无 composer 依赖）
+ *
+ * 放到目标项目/服务器上，配置日志目录，后台常驻运行：
+ * tail 日志文件 → 按格式解析（多行合并）→ 批量推送到 EasyLog 接入 API。
+ * lite / core / full 三档通用（仅需接入地址与 AppID/Secret）。
+ *
+ * 用法：
+ *   php easylog-agent start -c easylog-agent.json          # 常驻采集
+ *   php easylog-agent start -c conf.json --once            # 单轮采集后退出（cron 模式）
+ *   php easylog-agent test  -c easylog-agent.json          # 干跑：解析并打印，不上报
+ *   php easylog-agent reset -c easylog-agent.json          # 清空采集进度（下次从头采集）
+ *
+ * 无 root/常驻权限时可用 cron：* * * * * php .../easylog-agent start -c ... --once --quiet
+ *
+ * 采集语义：
+ *  - 断点续采：进度（inode+偏移）存 state 文件，重启不重发
+ *  - 轮转/截断：inode 变化按 start_position 处理；文件截断自动从头重读
+ *  - 多行合并：堆栈跟踪等续行并入上一条日志的 msg
+ *  - 发送：按 topic 分组批量 POST /ingest/batch，失败指数退避重试，4xx 配置错误快速失败
+ */
+
+error_reporting(E_ALL & ~E_DEPRECATED);
+@ini_set('memory_limit', '256M');
+date_default_timezone_set(date_default_timezone_get() ?: 'UTC');
+
+define('EASYLOG_AGENT_VERSION', '1.0.0');
+
+// ============================================================================
+// 入口
+// ============================================================================
+
+// 仅在作为主脚本直接执行时进入入口（被测试 include 时不执行）
+if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === realpath(__FILE__)) {
+    exit(main($argv));
+}
+
+function main(array $argv): int
+{
+    $cmd = isset($argv[1]) && $argv[1][0] !== '-' ? $argv[1] : 'start';
+    $opts = parseCliOptions(array_slice($argv, $cmd === $argv[1] && isset($argv[1]) ? 2 : 1));
+
+    if (in_array($cmd, ['-h', '--help', 'help'], true)) {
+        echo preg_replace('/^\s*\*\s?/m', '', substr(file_get_contents(__FILE__), strpos(file_get_contents(__FILE__), '/**'), 1400));
+        return 0;
+    }
+    if ($cmd === 'version') {
+        echo 'easylog-agent ' . EASYLOG_AGENT_VERSION . "\n";
+        return 0;
+    }
+
+    $configFile = isset($opts['c']) ? $opts['c'] : (isset($opts['config']) ? $opts['config'] : __DIR__ . '/easylog-agent.json');
+    if (!in_array($cmd, ['start', 'test', 'reset'], true)) {
+        fwrite(STDERR, "未知命令: {$cmd}（可用 start / test / reset）\n");
+        return 1;
+    }
+
+    try {
+        $config = AgentConfig::load($configFile);
+    } catch (RuntimeException $e) {
+        fwrite(STDERR, "配置错误: {$e->getMessage()}\n");
+        return 1;
+    }
+
+    if ($cmd === 'reset') {
+        StateStore::clear($config);
+        echo "已清空采集进度: {$config['state_file']}\n";
+        return 0;
+    }
+
+    $dryRun = $cmd === 'test' || isset($opts['dry-run']);
+    $once = isset($opts['once']) || $cmd === 'test';
+    $quiet = isset($opts['quiet']) || isset($opts['q']);
+    $verbose = isset($opts['v']) || isset($opts['verbose']);
+
+    return AgentDaemon::run($config, $dryRun, $once, $quiet, $verbose);
+}
+
+/**
+ * @return array<string,string>
+ */
+function parseCliOptions(array $args): array
+{
+    $opts = [];
+    $count = count($args);
+    for ($i = 0; $i < $count; $i++) {
+        $arg = $args[$i];
+        if ($arg === '--') break;
+        if (strlen($arg) > 1 && $arg[0] === '-') {
+            $key = ltrim($arg, '-');
+            if (strpos($key, '=') !== false) {
+                list($key, $val) = explode('=', $key, 2);
+                $opts[$key] = $val;
+            } elseif (isset($args[$i + 1]) && $args[$i + 1][0] !== '-') {
+                $opts[$key] = $args[++$i];
+            } else {
+                $opts[$key] = '1';
+            }
+        }
+    }
+    return $opts;
+}
+
+// ============================================================================
+// 配置
+// ============================================================================
+
+final class AgentConfig
+{
+    /**
+     * 加载并校验配置，返回合并默认值后的数组
+     *
+     * @return array<string,mixed>
+     */
+    public static function load(string $file): array
+    {
+        if (!is_file($file)) {
+            throw new RuntimeException("配置文件不存在: {$file}（参考 easylog-agent.json.example）");
+        }
+        $raw = json_decode((string) file_get_contents($file), true);
+        if (!is_array($raw)) {
+            throw new RuntimeException('配置必须是合法 JSON: ' . json_last_error_msg());
+        }
+
+        $server = isset($raw['server']) && is_array($raw['server']) ? $raw['server'] : [];
+        if (empty($server['url'])) throw new RuntimeException('缺少 server.url（EasyLog 接入地址，如 http://log.example.com:9515/api/v1）');
+        if (empty($server['app_id'])) throw new RuntimeException('缺少 server.app_id');
+        if (empty($server['app_secret'])) throw new RuntimeException('缺少 server.app_secret');
+        $server['url'] = rtrim((string) $server['url'], '/');
+        $server['timeout'] = isset($server['timeout']) ? (int) $server['timeout'] : 10;
+
+        $watches = [];
+        foreach ((isset($raw['watches']) ? $raw['watches'] : []) as $i => $w) {
+            if (!is_array($w) || empty($w['path'])) {
+                throw new RuntimeException("watches[{$i}] 缺少 path（日志目录或 glob）");
+            }
+            $w['parser'] = isset($w['parser']) ? $w['parser'] : 'plain';
+            $w['topic'] = isset($w['topic']) ? (string) $w['topic'] : (isset($raw['topic']) ? (string) $raw['topic'] : '');
+            $w['recursive'] = !empty($w['recursive']);
+            $w['pattern'] = isset($w['pattern']) ? $w['pattern'] : '*.log';
+            $w['start_position'] = isset($w['start_position']) ? $w['start_position'] : (isset($raw['start_position']) ? $raw['start_position'] : 'end');
+            if (!in_array($w['start_position'], ['beginning', 'end'], true)) {
+                throw new RuntimeException("watches[{$i}].start_position 仅支持 beginning|end");
+            }
+            $w['fields'] = isset($w['fields']) && is_array($w['fields']) ? $w['fields'] : [];
+            $w['source_prefix'] = isset($w['source_prefix']) ? (string) $w['source_prefix'] : '';
+            $watches[] = $w;
+        }
+        if (!$watches) throw new RuntimeException('watches 不能为空（至少配置一个日志目录/glob）');
+
+        return [
+            'server' => $server,
+            'watches' => $watches,
+            'state_file' => isset($raw['state_file']) ? $raw['state_file'] : __DIR__ . '/easylog-agent.state.json',
+            'batch_size' => isset($raw['batch_size']) ? max(1, (int) $raw['batch_size']) : 500,
+            'flush_interval_ms' => isset($raw['flush_interval_ms']) ? max(200, (int) $raw['flush_interval_ms']) : 2000,
+            'scan_interval_ms' => isset($raw['scan_interval_ms']) ? max(500, (int) $raw['scan_interval_ms']) : 2000,
+            'max_buffer' => isset($raw['max_buffer']) ? max(1000, (int) $raw['max_buffer']) : 100000,
+            'start_position' => isset($raw['start_position']) ? $raw['start_position'] : 'end',
+            'topic' => isset($raw['topic']) ? (string) $raw['topic'] : '',
+            'host_field' => array_key_exists('host_field', $raw) ? $raw['host_field'] : 'host',
+        ];
+    }
+}
+
+// ============================================================================
+// 日志行解析器
+// ============================================================================
+
+final class LogParser
+{
+    /** @var array<string,string> 通用级别归一表 */
+    private static $levelMap = [
+        'trace' => 'TRACE', 'verbose' => 'TRACE',
+        'debug' => 'DEBUG',
+        'info' => 'INFO', 'notice' => 'INFO',
+        'warn' => 'WARN', 'warning' => 'WARN',
+        'error' => 'ERROR', 'err' => 'ERROR',
+        'critical' => 'FATAL', 'crit' => 'FATAL', 'fatal' => 'FATAL',
+        'alert' => 'FATAL', 'emergency' => 'FATAL', 'panic' => 'FATAL',
+    ];
+
+    /**
+     * TP5/TP6 通用行首：[2026-10-25 10:00:00][info]... / [ 2026-10-25T10:00:00+08:00 ] [ info ] ...
+     */
+    const TP_HEAD = '/^\[\s*(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?)\s*\]\s*\[\s*([a-zA-Z]+)\s*\]\s*(.*)$/u';
+    /** Laravel 行首：[2026-10-25 10:00:00] production.ERROR: ... */
+    const LARAVEL_HEAD = '/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+[\w.-]+\.(\w+):\s*(.*)$/u';
+    /** TP5 文件内分隔线 */
+    const SEPARATOR = '/^-{5,}$/';
+
+    /**
+     * 解析一行。
+     *
+     * 返回：
+     *  - ['type' => 'entry', 'entry' => [msg, level, ts, ...]]  新日志条目首行
+     *  - ['type' => 'skip']                                     分隔线等应忽略的行
+     *  - ['type' => 'continue']                                 续行（并入上一条 msg）
+     *
+     * @param array<string,mixed> $watch
+     * @return array<string,mixed>
+     */
+    public static function parseLine($line, array $watch)
+    {
+        $line = rtrim($line, "\r\n");
+        $parser = $watch['parser'];
+
+        if ($parser === 'plain') {
+            return ['type' => 'entry', 'entry' => self::entry($line, 'INFO', self::nowIso())];
+        }
+
+        if ($parser === 'json') {
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $msg = '';
+                foreach (['msg', 'message'] as $k) {
+                    if (isset($decoded[$k]) && is_scalar($decoded[$k])) { $msg = (string) $decoded[$k]; unset($decoded[$k]); break; }
+                }
+                $level = 'INFO';
+                foreach (['level', 'levelname', 'severity'] as $k) {
+                    if (isset($decoded[$k]) && is_scalar($decoded[$k])) { $level = self::normalizeLevel($decoded[$k]); unset($decoded[$k]); break; }
+                }
+                $ts = self::nowIso();
+                foreach (['ts', 'time', 'datetime', '@timestamp'] as $k) {
+                    if (isset($decoded[$k]) && is_scalar($decoded[$k])) { $ts = (string) $decoded[$k]; unset($decoded[$k]); break; }
+                }
+                $entry = self::entry($msg !== '' ? $msg : $line, $level, $ts);
+                foreach ($decoded as $k => $v) {
+                    if (is_scalar($v) || $v === null) $entry[$k] = $v;
+                }
+                return ['type' => 'entry', 'entry' => $entry];
+            }
+            return ['type' => 'continue'];
+        }
+
+        if ($parser === 'thinkphp') {
+            if (preg_match(self::SEPARATOR, trim($line))) return ['type' => 'skip'];
+            if (preg_match(self::TP_HEAD, $line, $m)) {
+                return ['type' => 'entry', 'entry' => self::entry($m[3], self::normalizeLevel($m[2]), $m[1])];
+            }
+            return ['type' => 'continue'];
+        }
+
+        if ($parser === 'laravel') {
+            if (preg_match(self::LARAVEL_HEAD, $line, $m)) {
+                return ['type' => 'entry', 'entry' => self::entry($m[3], self::normalizeLevel($m[2]), $m[1])];
+            }
+            return ['type' => 'continue'];
+        }
+
+        if ($parser === 'regex') {
+            if (empty($watch['line_pattern'])) return ['type' => 'entry', 'entry' => self::entry($line, 'INFO', self::nowIso())];
+            if (preg_match($watch['line_pattern'], $line, $m)) {
+                $entry = self::entry(
+                    isset($m['msg']) ? $m['msg'] : $line,
+                    self::normalizeLevel(isset($m['level']) ? $m['level'] : 'INFO'),
+                    isset($m['ts']) ? $m['ts'] : self::nowIso()
+                );
+                foreach ($m as $k => $v) {
+                    if (is_string($k) && !in_array($k, ['msg', 'level', 'ts'], true)) $entry[$k] = $v;
+                }
+                return ['type' => 'entry', 'entry' => $entry];
+            }
+            return ['type' => 'continue'];
+        }
+
+        return ['type' => 'entry', 'entry' => self::entry($line, 'INFO', self::nowIso())];
+    }
+
+    /**
+     * @param array<string,mixed> $watch
+     * @return array<string,mixed>
+     */
+    public static function decorate(array $entry, array $watch, string $file, $hostField)
+    {
+        if ($hostField) $entry['host'] = gethostname() ?: '';
+        $entry['source'] = $watch['source_prefix']
+            ? $watch['source_prefix'] . '/' . basename($file)
+            : basename($file);
+        foreach ($watch['fields'] as $k => $v) {
+            if (is_scalar($v)) $entry[$k] = $v;
+        }
+        return $entry;
+    }
+
+    /**
+     * @return array<string,mixed>
+     */
+    private static function entry(string $msg, string $level, string $ts)
+    {
+        return ['msg' => $msg, 'level' => $level, 'ts' => $ts];
+    }
+
+    public static function normalizeLevel($level): string
+    {
+        $key = strtolower(trim((string) $level));
+        return isset(self::$levelMap[$key]) ? self::$levelMap[$key] : 'INFO';
+    }
+
+    public static function nowIso(): string
+    {
+        return date('Y-m-d\TH:i:s') . substr((string) microtime(true), 1, 4) . '+00:00';
+    }
+}
+
+// ============================================================================
+// 采集进度（断点续采）
+// ============================================================================
+
+final class StateStore
+{
+    /**
+     * @param array<string,mixed> $config
+     * @return array<string,array{inode:int,pos:int}>
+     */
+    public static function load(array $config): array
+    {
+        $file = $config['state_file'];
+        if (!is_file($file)) return [];
+        $data = json_decode((string) file_get_contents($file), true);
+        if (!is_array($data) || !isset($data['files']) || !is_array($data['files'])) return [];
+        return $data['files'];
+    }
+
+    /**
+     * @param array<string,array{inode:int,pos:int}> $files
+     */
+    public static function save(array $config, array $files): void
+    {
+        $file = $config['state_file'];
+        $dir = dirname($file);
+        if (!is_dir($dir)) @mkdir($dir, 0750, true);
+        $payload = json_encode(['version' => 1, 'files' => $files, 'saved_at' => date('c')], JSON_UNESCAPED_SLASHES);
+        $tmp = $file . '.tmp.' . getmypid();
+        if (file_put_contents($tmp, $payload) !== false) {
+            @rename($tmp, $file);
+        }
+    }
+
+    public static function clear(array $config): void
+    {
+        @unlink($config['state_file']);
+    }
+}
+
+// ============================================================================
+// 文件发现（glob / 目录递归）
+// ============================================================================
+
+final class FileScanner
+{
+    /**
+     * @param array<string,mixed> $watch
+     * @return array<int,string> realpath 列表
+     */
+    public static function scan(array $watch): array
+    {
+        $path = $watch['path'];
+        $files = [];
+
+        if (is_dir($path)) {
+            if ($watch['recursive']) {
+                $it = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS),
+                    RecursiveIteratorIterator::LEAVES_ONLY
+                );
+                foreach ($it as $f) {
+                    /** @var SplFileInfo $f */
+                    if (fnmatch($watch['pattern'], $f->getFilename())) $files[] = $f->getRealPath();
+                }
+            } else {
+                foreach (glob(rtrim($path, '/') . '/' . $watch['pattern']) ?: [] as $f) {
+                    if (is_file($f)) $files[] = realpath($f);
+                }
+            }
+        } else {
+            foreach (glob($path) ?: [] as $f) {
+                if (is_file($f)) $files[] = realpath($f);
+            }
+        }
+
+        return array_values(array_unique(array_filter($files)));
+    }
+}
+
+// ============================================================================
+// 单文件 tail 读取（偏移续读 / 轮转 / 截断 / 多行合并）
+// ============================================================================
+
+final class TailReader
+{
+    /**
+     * 读取一个文件自上次偏移到 EOF，产出完整日志条目并更新 state。
+     *
+     * @param array<string,mixed> $watch
+     * @param array{inode:int,pos:int} $state
+     * @return array{entries:array<int,array<string,mixed>>, state:array{inode:int,pos:int}}
+     */
+    public static function read(string $file, array $watch, array $state): array
+    {
+        clearstatcache(true, $file);
+        $inode = @fileinode($file);
+        $size = @filesize($file);
+        if ($inode === false || $size === false) {
+            return ['entries' => [], 'state' => $state];
+        }
+
+        $pos = 0;
+        if (isset($state['inode']) && (int) $state['inode'] === $inode) {
+            $pos = (int) $state['pos'];
+            if ($pos > $size) $pos = 0; // 截断（log_rotate copytruncate）
+        } elseif ($watch['start_position'] === 'end') {
+            $pos = $size; // 新文件只采增量
+        }
+
+        if ($pos >= $size) {
+            return ['entries' => [], 'state' => ['inode' => $inode, 'pos' => $size]];
+        }
+
+        $fp = @fopen($file, 'rb');
+        if (!$fp) return ['entries' => [], 'state' => $state];
+        fseek($fp, $pos);
+
+        $entries = [];
+        $pending = null; // 未终结的多行条目
+
+        while (($line = fgets($fp)) !== false) {
+            $pos = ftell($fp);
+            $parsed = LogParser::parseLine($line, $watch);
+
+            if ($parsed['type'] === 'skip') continue;
+            if ($parsed['type'] === 'continue') {
+                if ($pending !== null) {
+                    $pending['msg'] .= "\n" . rtrim($line, "\r\n");
+                } elseif (trim($line) !== '') {
+                    // 文件开头出现无主续行（如无时间戳的抬头）：独立成条
+                    $pending = ['msg' => rtrim($line, "\r\n"), 'level' => 'INFO', 'ts' => LogParser::nowIso()];
+                }
+                continue;
+            }
+
+            if ($pending !== null) $entries[] = $pending;
+            $pending = $parsed['entry'];
+        }
+        if ($pending !== null) $entries[] = $pending; // EOF 收尾
+
+        fclose($fp);
+
+        return ['entries' => $entries, 'state' => ['inode' => $inode, 'pos' => $pos]];
+    }
+}
+
+// ============================================================================
+// 发送器（按 topic 分组批量 / 退避重试 / 缓冲上限）
+// ============================================================================
+
+final class Sender
+{
+    /** @var array<int,array{topic:string,entry:array<string,mixed>}> */
+    private $buffer = [];
+    private $bufferLimit;
+    private $dropped = 0;
+    private $failures = 0;
+    private $sentTotal = 0;
+    private $quiet;
+    private $dryRun;
+
+    public function __construct(array $config, bool $quiet, bool $dryRun)
+    {
+        $this->bufferLimit = $config['max_buffer'];
+        $this->quiet = $quiet;
+        $this->dryRun = $dryRun;
+    }
+
+    public function add(string $topic, array $entry): void
+    {
+        $this->buffer[] = ['topic' => $topic, 'entry' => $entry];
+        if (count($this->buffer) > $this->bufferLimit) {
+            $drop = count($this->buffer) - $this->bufferLimit;
+            $this->dropped += $drop;
+            $this->buffer = array_slice($this->buffer, $drop);
+        }
+    }
+
+    public function pending(): int
+    {
+        return count($this->buffer);
+    }
+
+    public function shouldFlush(array $config): bool
+    {
+        return count($this->buffer) >= $config['batch_size'];
+    }
+
+    /**
+     * 发送全部缓冲。返回 true 表示缓冲已清空（或干跑）。
+     *
+     * @throws RuntimeException 4xx 配置类错误（鉴权/参数），应终止进程
+     */
+    public function flush(array $config): bool
+    {
+        if ($this->buffer === []) return true;
+
+        if ($this->dryRun) {
+            foreach ($this->buffer as $item) {
+                echo '[' . $item['entry']['level'] . '] ' . substr($item['entry']['msg'], 0, 120)
+                    . '  {ts=' . $item['entry']['ts'] . ', source=' . (isset($item['entry']['source']) ? $item['entry']['source'] : '') . "}\n";
+            }
+            $this->buffer = [];
+            return true;
+        }
+
+        // 按 topic 分组（每组一个请求，topic 走 X-EasyLog-Topic 头覆盖）
+        $groups = [];
+        foreach ($this->buffer as $item) {
+            $groups[$item['topic']][] = $item['entry'];
+        }
+
+        $server = $config['server'];
+        foreach ($groups as $topic => $entries) {
+            $body = json_encode(['logs' => $entries], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            $headers = [
+                'Content-Type: application/json',
+                'Accept: application/json',
+                'X-EasyLog-App: ' . $server['app_id'],
+                'Authorization: Bearer ' . $server['app_secret'],
+            ];
+            if ($topic !== '') $headers[] = 'X-EasyLog-Topic: ' . $topic;
+
+            list($status, $respBody) = self::httpPost(
+                $server['url'] . '/ingest/batch',
+                $body,
+                $headers,
+                (int) $server['timeout']
+            );
+
+            if ($status >= 200 && $status < 300) {
+                $this->sentTotal += count($entries);
+                $this->failures = 0;
+                unset($groups[$topic]);
+                $this->log("sent " . count($entries) . " logs (topic=" . ($topic !== '' ? $topic : 'default') . ")");
+            } elseif ($status === 401 || $status === 403 || $status === 400) {
+                // 配置类错误：继续重试没有意义
+                throw new RuntimeException("接入被拒(HTTP {$status})，请检查 server.url/app_id/app_secret/topic: " . substr((string) $respBody, 0, 200));
+            } else {
+                $this->failures++;
+                $this->log("send failed HTTP {$status}, will retry (backoff " . $this->backoffSeconds() . "s): " . substr((string) $respBody, 0, 200), true);
+            }
+        }
+
+        // 重发成功的组从缓冲移除
+        $remaining = [];
+        foreach ($this->buffer as $item) {
+            if (isset($groups[$item['topic']])) $remaining[] = $item;
+        }
+        $this->buffer = $remaining;
+        return $this->buffer === [];
+    }
+
+    public function backoffSeconds(): int
+    {
+        return min(30, (int) pow(2, min($this->failures, 5)));
+    }
+
+    public function stats(): string
+    {
+        return sprintf('sent=%d pending=%d dropped=%d', $this->sentTotal, count($this->buffer), $this->dropped);
+    }
+
+    private function log(string $msg, bool $isWarn = false): void
+    {
+        if ($this->quiet) return;
+        fwrite($isWarn ? STDERR : STDOUT, '[' . date('H:i:s') . '] ' . $msg . "\n");
+    }
+
+    /**
+     * @return array{int,string}
+     */
+    private static function httpPost(string $url, string $body, array $headers, int $timeout): array
+    {
+        $ctx = stream_context_create(['http' => [
+            'method' => 'POST',
+            'header' => implode("\r\n", $headers),
+            'content' => $body,
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+        ]]);
+        $resp = @file_get_contents($url, false, $ctx);
+        $status = 0;
+        foreach ($http_response_header ?: [] as $h) {
+            if (preg_match('#^HTTP/\S+\s+(\d+)#', $h, $m)) { $status = (int) $m[1]; break; }
+        }
+        return [$status, (string) $resp];
+    }
+}
+
+// ============================================================================
+// 主循环
+// ============================================================================
+
+final class AgentDaemon
+{
+    public static function run(array $config, bool $dryRun, bool $once, bool $quiet, bool $verbose): int
+    {
+        $sender = new Sender($config, $quiet, $dryRun);
+        $states = StateStore::load($config);
+        $hostField = $config['host_field'];
+
+        $lastScan = 0;
+        $lastFlush = 0;
+        $lastBackoffUntil = 0;
+        $stop = false;
+
+        if (function_exists('pcntl_signal')) {
+            pcntl_signal(SIGTERM, function () use (&$stop) { $stop = true; });
+            pcntl_signal(SIGINT, function () use (&$stop) { $stop = true; });
+        }
+
+        if (!$quiet) {
+            fwrite(STDOUT, sprintf(
+                "easylog-agent v%s | server=%s | watches=%d | %s\n",
+                EASYLOG_AGENT_VERSION,
+                $dryRun ? 'DRY-RUN' : $config['server']['url'],
+                count($config['watches']),
+                $once ? 'once' : 'daemon'
+            ));
+        }
+
+        $scanMs = $config['scan_interval_ms'];
+        $flushMs = $config['flush_interval_ms'];
+
+        while (!$stop) {
+            $now = (int) (microtime(true) * 1000);
+
+            // 发送退避：连续失败期间跳过本轮 flush，但继续采集（缓冲兜底）
+            if ($now >= $lastBackoffUntil) {
+                // 1) 扫描文件 + 增量读取
+                if ($now - $lastScan >= $scanMs) {
+                    $lastScan = $now;
+                    foreach ($config['watches'] as $watch) {
+                        foreach (FileScanner::scan($watch) as $file) {
+                            $state = isset($states[$file]) ? $states[$file] : ['inode' => 0, 'pos' => 0];
+                            $result = TailReader::read($file, $watch, $state);
+                            $states[$file] = $result['state'];
+                            foreach ($result['entries'] as $entry) {
+                                $sender->add($watch['topic'], LogParser::decorate($entry, $watch, $file, $hostField));
+                            }
+                        }
+                    }
+                }
+
+                // 2) 批量上报
+                $shouldFlush = $sender->shouldFlush($config) || ($now - $lastFlush >= $flushMs && $sender->pending() > 0);
+                if ($shouldFlush) {
+                    $lastFlush = $now;
+                    try {
+                        $sender->flush($config);
+                    } catch (RuntimeException $e) {
+                        fwrite(STDERR, '致命错误: ' . $e->getMessage() . "\n");
+                        StateStore::save($config, $states);
+                        return 2;
+                    }
+                    if ($sender->pending() > 0) {
+                        $lastBackoffUntil = (int) (microtime(true) * 1000) + $sender->backoffSeconds() * 1000;
+                    }
+                }
+            }
+
+            StateStore::save($config, $states);
+
+            if ($verbose && !$quiet && mt_rand(1, 50) === 1) {
+                fwrite(STDOUT, '  stats: ' . $sender->stats() . "\n");
+            }
+
+            if ($once) {
+                // 单轮模式：退出前把缓冲全部发完（最多再等一个退避周期）
+                if ($sender->pending() === 0) break;
+                if ($lastBackoffUntil > 0 && (int) (microtime(true) * 1000) < $lastBackoffUntil) {
+                    usleep(200000);
+                    continue;
+                }
+                break;
+            }
+
+            if (function_exists('pcntl_signal_dispatch')) pcntl_signal_dispatch();
+            usleep(200000); // 200ms tick
+        }
+
+        StateStore::save($config, $states);
+        if (!$quiet) {
+            fwrite(STDOUT, 'agent stopped, ' . $sender->stats() . "\n");
+        }
+        return 0;
+    }
+}

@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EasyLog · 用量配额</title>
+  <link rel="stylesheet" href="assets/styles.css" />
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+</head>
+<body>
+  <script src="assets/mock.js"></script>
+  <script src="assets/charts.js"></script>
+  <script>
+    /* ---------- Toast helper ---------- */
+    function showToast(message) {
+      let toast = document.getElementById('toast-overlay');
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast-overlay';
+        toast.className = 'modal-overlay';
+        toast.style.alignItems = 'center';
+        toast.style.justifyContent = 'center';
+        toast.style.background = 'rgba(0,0,0,0.3)';
+        document.body.appendChild(toast);
+      }
+      toast.innerHTML = `
+        <div style="background:var(--bg-surface);border:1px solid var(--border-base);
+                    border-radius:var(--radius-lg);padding:var(--space-4) var(--space-5);
+                    box-shadow:var(--shadow-lg);min-width:240px;text-align:center;">
+          <div style="font-size:var(--text-md);color:var(--text-primary);">${message}</div>
+        </div>`;
+      toast.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    /* ---------- State ---------- */
+    let workspaces = [];
+    let usageSeries = null;
+    let activeTab = 'stats';
+    let timeRange = '7d';
+    let quotaData = [];
+    let charts = {};
+
+    const labels7d = ['9-06','9-07','9-08','9-09','9-10','9-11','9-12'];
+
+    /* ---------- Init ---------- */
+    async function initPage() {
+      workspaces = await MockAPI.listWorkspaces();
+      usageSeries = await MockAPI.getUsageSeries();
+      quotaData = buildQuotaData(workspaces);
+      renderPage();
+    }
+
+    function buildQuotaData(wss) {
+      // Per workspace × per dimension
+      const out = [];
+      wss.forEach(ws => {
+        out.push({ ws_uuid: ws.uuid, ws_name: ws.name, dimension: '写入GB/日', current: ws.ingest_gb_today, limit: 50, unit: 'GB' });
+        out.push({ ws_uuid: ws.uuid, ws_name: ws.name, dimension: '查询次数/日', current: ws.query_count_today, limit: 5000, unit: '次' });
+        out.push({ ws_uuid: ws.uuid, ws_name: ws.name, dimension: '存储GB', current: (ws.topics || 8) * 3.2, limit: 500, unit: 'GB' });
+      });
+      return out;
+    }
+
+    function renderPage() {
+      const tabsHTML = `
+        <div class="tabs mb-4">
+          <div class="tab ${activeTab === 'stats' ? 'active' : ''}" onclick="switchTab('stats')">
+            <i data-lucide="bar-chart-3" style="width:14px;height:14px;display:inline;vertical-align:middle;margin-right:4px;"></i>用量统计
+          </div>
+          <div class="tab ${activeTab === 'quota' ? 'active' : ''}" onclick="switchTab('quota')">
+            <i data-lucide="sliders-horizontal" style="width:14px;height:14px;display:inline;vertical-align:middle;margin-right:4px;"></i>配额设置
+          </div>
+        </div>
+      `;
+      const contentHTML = activeTab === 'stats' ? renderStatsTab() : renderQuotaTab();
+      const mainHTML = tabsHTML + contentHTML;
+
+      EasyLogUI.render({
+        activeNavKey: 'usage',
+        pageTitle: '用量配额',
+        breadcrumbHTML: '<a href="index.html">概览</a><span class="breadcrumb-sep">/</span><span>监控告警</span><span class="breadcrumb-sep">/</span><span>用量配额</span>',
+        actionsHTML: '',
+        mainHTML
+      });
+      lucide.createIcons();
+
+      if (activeTab === 'stats') {
+        renderCharts();
+      }
+    }
+
+    function renderStatsTab() {
+      const totalIngest = workspaces.reduce((s, w) => s + w.ingest_gb_today, 0).toFixed(1);
+      const totalQuery = workspaces.reduce((s, w) => s + w.query_count_today, 0);
+      const totalStorage = usageSeries.storage_gb[usageSeries.storage_gb.length - 1];
+      const estCost = (totalIngest * 0.23 + totalStorage * 0.02).toFixed(2);
+
+      return `
+        <div class="flex items-center gap-2 mb-4">
+          <span class="text-sm text-secondary">时间范围：</span>
+          <select class="form-select" style="width:auto;" onchange="changeRange(this.value)">
+            <option value="7d" ${timeRange === '7d' ? 'selected' : ''}>近 7 天</option>
+            <option value="30d" ${timeRange === '30d' ? 'selected' : ''}>近 30 天</option>
+            <option value="month" ${timeRange === 'month' ? 'selected' : ''}>本月</option>
+            <option value="custom" ${timeRange === 'custom' ? 'selected' : ''}>自定义</option>
+          </select>
+          ${timeRange === 'custom' ? `
+            <input type="date" class="form-input" style="width:auto;" value="2026-09-06" />
+            <span class="text-muted">至</span>
+            <input type="date" class="form-input" style="width:auto;" value="2026-09-12" />
+            <button class="btn btn-primary btn-sm"><i data-lucide="search" style="width:12px;height:12px;"></i>查询</button>
+          ` : ''}
+        </div>
+
+        <div class="grid grid-cols-4 mb-5">
+          ${EasyLogUI.statCard('今日写入', totalIngest + ' GB', '+5.2%', 'trend-up')}
+          ${EasyLogUI.statCard('今日查询次数', EasyLogUI.formatNumber(totalQuery), '+8.1%', 'trend-up')}
+          ${EasyLogUI.statCard('存储占用', totalStorage + ' GB', '+5 GB', 'trend-up')}
+          ${EasyLogUI.statCard('估算费用', '¥' + estCost, '今日累计', 'trend-flat', '按量计费')}
+        </div>
+
+        <div class="card mb-4">
+          <div class="card-header">
+            <div>
+              <div class="card-title">近 7 天写入趋势</div>
+              <div class="card-subtitle">单位：GB / 日</div>
+            </div>
+            <span class="badge badge-info">写入量</span>
+          </div>
+          <div id="chart-ingest" style="height:280px;width:100%;"></div>
+        </div>
+
+        <div class="grid grid-cols-2 mb-4">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">查询次数趋势</div>
+                <div class="card-subtitle">按工作空间分组</div>
+              </div>
+              <span class="badge badge-info">查询</span>
+            </div>
+            <div id="chart-query" style="height:240px;width:100%;"></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">存储增长趋势</div>
+                <div class="card-subtitle">累计存储 GB</div>
+              </div>
+              <span class="badge badge-info">存储</span>
+            </div>
+            <div id="chart-storage" style="height:240px;width:100%;"></div>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <div class="card-header" style="padding:var(--space-4);">
+            <div>
+              <div class="card-title">各工作空间用量明细</div>
+              <div class="card-subtitle">${workspaces.length} 个工作空间</div>
+            </div>
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>工作空间</th>
+                <th>今日写入 (GB)</th>
+                <th>今日查询 (次)</th>
+                <th>主题数</th>
+                <th>告警</th>
+                <th>占比</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${workspaces.map(ws => {
+                const total = workspaces.reduce((s, w) => s + w.ingest_gb_today, 0) || 1;
+                const pct = ((ws.ingest_gb_today / total) * 100).toFixed(1);
+                return `
+                  <tr>
+                    <td><div style="font-weight:500;">${ws.name}</div><div class="cell-muted text-xs">${ws.uuid}</div></td>
+                    <td class="cell-mono">${ws.ingest_gb_today.toFixed(2)}</td>
+                    <td class="cell-mono">${EasyLogUI.formatNumber(ws.query_count_today)}</td>
+                    <td>${ws.topics}</td>
+                    <td>${ws.alerts_active > 0 ? `<span class="badge badge-warning">${ws.alerts_active}</span>` : '<span class="cell-muted">0</span>'}</td>
+                    <td>
+                      <div class="flex items-center gap-2">
+                        <div style="flex:1;height:6px;background:var(--bg-base);border-radius:3px;overflow:hidden;max-width:120px;">
+                          <div style="width:${pct}%;height:100%;background:linear-gradient(90deg,#4F7CFF,#6B91FF);"></div>
+                        </div>
+                        <span class="text-xs cell-muted">${pct}%</span>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderQuotaTab() {
+      return `
+        <div class="card mb-5" style="display:flex;gap:var(--space-4);align-items:flex-start;">
+          <div style="width:36px;height:36px;border-radius:var(--radius-md);background:rgba(245,166,35,0.12);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <i data-lucide="alert-triangle" style="width:18px;height:18px;color:var(--warning);"></i>
+          </div>
+          <div>
+            <div style="font-size:var(--text-md);font-weight:600;margin-bottom:var(--space-1);">配额维度与超额行为</div>
+            <div style="font-size:var(--text-sm);color:var(--text-secondary);line-height:1.6;">
+              EasyLog 为每个工作空间提供三类配额：写入 GB/日、查询次数/日、存储 GB。
+              超额时系统将自动触发：1) 写入配额超限 → 接入点限流；2) 查询配额超限 → 拒绝新查询请求；3) 存储配额超限 → 触发归档或拒绝新数据写入。
+            </div>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <div class="card-header" style="padding:var(--space-4);">
+            <div>
+              <div class="card-title">配额列表</div>
+              <div class="card-subtitle">共 ${quotaData.length} 条配额规则</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="openQuotaEdit(null)">
+              <i data-lucide="plus" style="width:12px;height:12px;"></i>新增配额
+            </button>
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>工作空间</th>
+                <th>维度</th>
+                <th>当前值</th>
+                <th>配额上限</th>
+                <th>使用率</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${quotaData.map((q, i) => {
+                const pct = Math.min(100, (q.current / q.limit) * 100).toFixed(1);
+                const color = pct >= 80 ? 'var(--danger)' : (pct >= 60 ? 'var(--warning)' : 'var(--success)');
+                const bg = pct >= 80 ? 'rgba(245,69,92,0.15)' : (pct >= 60 ? 'rgba(245,166,35,0.15)' : 'rgba(46,186,104,0.15)');
+                return `
+                  <tr>
+                    <td><div style="font-weight:500;">${q.ws_name}</div></td>
+                    <td>${q.dimension}</td>
+                    <td class="cell-mono">${q.current.toFixed(1)} ${q.unit}</td>
+                    <td class="cell-mono">${q.limit} ${q.unit}</td>
+                    <td>
+                      <div class="flex items-center gap-2">
+                        <div style="flex:1;height:6px;background:var(--bg-base);border-radius:3px;overflow:hidden;min-width:120px;">
+                          <div style="width:${pct}%;height:100%;background:${color};"></div>
+                        </div>
+                        <span class="text-xs" style="color:${color};">${pct}%</span>
+                      </div>
+                    </td>
+                    <td>
+                      <button class="btn btn-secondary btn-sm" onclick="openQuotaEdit(${i})">
+                        <i data-lucide="pencil" style="width:12px;height:12px;"></i>编辑
+                      </button>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderCharts() {
+      // Use setTimeout to ensure DOM is rendered
+      setTimeout(() => {
+        if (typeof echarts === 'undefined' || !window.EasyLogCharts) return;
+
+        const ingestEl = document.getElementById('chart-ingest');
+        if (ingestEl) {
+          charts.ingest = EasyLogCharts.ingestTrend(ingestEl, {
+            labels: labels7d,
+            data: MockData.usage_series.ingest_gb,
+            seriesName: '写入 GB'
+          });
+        }
+
+        const queryEl = document.getElementById('chart-query');
+        if (queryEl) {
+          // multiLineChart: split query count across two workspaces for demo
+          const totalQuery = MockData.usage_series.query_count;
+          const ws1 = totalQuery.map(v => Math.round(v * 0.45));
+          const ws2 = totalQuery.map(v => Math.round(v * 0.35));
+          const ws3 = totalQuery.map(v => Math.round(v * 0.20));
+          charts.query = EasyLogCharts.multiLineChart(queryEl, {
+            labels: labels7d,
+            series: [
+              { name: 'Acme 生产', data: ws1 },
+              { name: '数据平台', data: ws2 },
+              { name: '其他', data: ws3 }
+            ]
+          });
+        }
+
+        const storageEl = document.getElementById('chart-storage');
+        if (storageEl) {
+          // Reuse ingestTrend-style: a single line area chart via a fresh init
+          charts.storage = echarts.init(storageEl, null, { renderer: 'canvas' });
+          charts.storage.setOption(Object.assign(EasyLogCharts.defaultOpts(), {
+            tooltip: { trigger: 'axis' },
+            xAxis: {
+              type: 'category', data: labels7d,
+              axisLine: { lineStyle: { color: '#2F3548' } },
+              axisLabel: { color: '#6B7180', fontSize: 10 },
+              axisTick: { show: false }
+            },
+            yAxis: {
+              type: 'value', name: 'GB',
+              nameTextStyle: { color: '#6B7180', fontSize: 10 },
+              axisLine: { show: false },
+              axisLabel: { color: '#6B7180', fontSize: 10 },
+              splitLine: { lineStyle: { color: '#1A1F2C' } }
+            },
+            series: [{
+              name: '存储', type: 'line', smooth: true, showSymbol: false,
+              data: MockData.usage_series.storage_gb,
+              lineStyle: { color: '#2EBA68', width: 2 },
+              itemStyle: { color: '#2EBA68' },
+              areaStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                  { offset: 0, color: 'rgba(46,186,104,0.35)' },
+                  { offset: 1, color: 'rgba(46,186,104,0.02)' }
+                ])
+              }
+            }]
+          }));
+          window.addEventListener('resize', () => charts.storage.resize());
+        }
+      }, 50);
+    }
+
+    function switchTab(tab) {
+      activeTab = tab;
+      // dispose charts before re-render
+      Object.values(charts).forEach(c => { try { c.dispose && c.dispose(); } catch(e){} });
+      charts = {};
+      renderPage();
+    }
+
+    function changeRange(val) {
+      timeRange = val;
+      renderPage();
+    }
+
+    function openQuotaEdit(idx) {
+      const isEdit = idx !== null && idx !== undefined;
+      const q = isEdit ? quotaData[idx] : { ws_uuid: '', ws_name: '', dimension: '写入GB/日', current: 0, limit: 50, unit: 'GB' };
+      let modal = document.getElementById('quota-modal');
+      if (modal) modal.remove();
+      modal = document.createElement('div');
+      modal.id = 'quota-modal';
+      modal.className = 'modal-overlay show';
+      modal.innerHTML = `
+        <div class="modal">
+          <div class="modal-header">
+            <div class="modal-title">${isEdit ? '编辑配额' : '新增配额'}</div>
+            <button class="modal-close" onclick="closeModal('quota-modal')"><i data-lucide="x"></i></button>
+          </div>
+          <div class="modal-body">
+            <div class="form-row">
+              <label class="form-label">工作空间 <span class="req">*</span></label>
+              <select class="form-select" id="q-ws" ${isEdit ? 'disabled' : ''}>
+                ${workspaces.map(w => `<option value="${w.uuid}" ${q.ws_uuid === w.uuid ? 'selected' : ''}>${w.name}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">配额维度 <span class="req">*</span></label>
+              <select class="form-select" id="q-dim">
+                <option value="写入GB/日" ${q.dimension === '写入GB/日' ? 'selected' : ''}>写入 GB / 日</option>
+                <option value="查询次数/日" ${q.dimension === '查询次数/日' ? 'selected' : ''}>查询次数 / 日</option>
+                <option value="存储GB" ${q.dimension === '存储GB' ? 'selected' : ''}>存储 GB</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label class="form-label">配额上限 <span class="req">*</span></label>
+              <input class="form-input" id="q-limit" type="number" value="${q.limit}" />
+              <div class="form-hint">当前使用：${q.current.toFixed(1)} ${q.unit}</div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeModal('quota-modal')">取消</button>
+            <button class="btn btn-primary" onclick="submitQuota(${idx})"><i data-lucide="check"></i>${isEdit ? '保存' : '创建'}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      lucide.createIcons();
+    }
+
+    function closeModal(id) {
+      const el = document.getElementById(id);
+      if (el) el.classList.remove('show');
+    }
+
+    function submitQuota(idx) {
+      const wsUuid = document.getElementById('q-ws').value;
+      const dim = document.getElementById('q-dim').value;
+      const limit = parseFloat(document.getElementById('q-limit').value);
+      if (!limit || limit <= 0) { showToast('请输入有效配额上限'); return; }
+      const ws = workspaces.find(w => w.uuid === wsUuid);
+      const unit = dim.includes('查询') ? '次' : 'GB';
+      const current = dim === '写入GB/日' ? (ws ? ws.ingest_gb_today : 0)
+                    : dim === '查询次数/日' ? (ws ? ws.query_count_today : 0)
+                    : ((ws ? ws.topics : 8) * 3.2);
+      if (idx !== null && idx !== undefined && quotaData[idx]) {
+        quotaData[idx] = { ws_uuid: wsUuid, ws_name: ws ? ws.name : wsUuid, dimension: dim, current, limit, unit };
+      } else {
+        quotaData.push({ ws_uuid: wsUuid, ws_name: ws ? ws.name : wsUuid, dimension: dim, current, limit, unit });
+      }
+      closeModal('quota-modal');
+      showToast('配额已保存');
+      renderPage();
+    }
+
+    initPage();
+  </script>
+</body>
+</html>

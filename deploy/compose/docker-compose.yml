@@ -1,0 +1,334 @@
+name: easylog
+
+# EasyLog 三档按需启动（详见 deploy/README.md 档位矩阵）：
+#
+# 档位由 COMPOSE_PROFILES 决定（.env 默认 lite，start.sh 切档时自动覆盖）：
+#
+#   lite（默认）  COMPOSE_PROFILES=lite   docker compose up -d    （或 ./start.sh）
+#                → app + frontend 两个容器，SQLite 元数据与日志、direct 直写总线，
+#                  零外部依赖（无 MySQL/Redis/ES/Kafka/ZK/Rabbit），内存 ~200MB
+#   core         COMPOSE_PROFILES=core   docker compose up -d    （或 ./start.sh core）
+#                → redis/es/zk/kafka + admin/ingestion/query/writer + frontend，
+#                  MySQL 用宿主机实例（DB_HOST 默认 192.168.1.100，见 .env）
+#   full         COMPOSE_PROFILES=core,full  docker compose up -d（或 ./start.sh full）
+#                → core + rabbitmq + worker（外部 MQ 消费 + 命令行告警巡检）
+#
+# 注意：lite 的 app 与 core 的 admin 都以 admin 角色占用宿主 9515 端口，
+#       档位互斥，切换请先 ./start.sh stop（或 docker compose down）。
+
+services:
+  # ============================================================================
+  # lite 档：单应用容器，全自包含
+  #  - SERVICE_ROLE=admin：单进程同时承担接入 API(/api/v1/ingest/*)、管理面与检索
+  #  - 元数据与日志都存 SQLite（storage 卷持久化）
+  #  - 告警巡检默认关闭，需要时设 EASYLOG_ALERT_LOOPS=1（随本容器附带拉起）
+  # ============================================================================
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      network: host
+    image: easylog/app:dev
+    container_name: easylog-app
+    restart: unless-stopped
+    profiles: ["lite"]
+    environment:
+      SERVICE_ROLE: admin
+      OCTANE_PORT: 9515
+      OCTANE_WORKERS: "${LITE_OCTANE_WORKERS:-2}"
+      APP_KEY: "${EASYLOG_APP_KEY:?请在 deploy/compose/.env 中设置 EASYLOG_APP_KEY（或用 ./start.sh 自动生成）}"
+      APP_ENV: "${APP_ENV:-local}"
+      APP_DEBUG: "${APP_DEBUG:-false}"
+      # 全自包含：SQLite 元数据（无 DB_HOST）+ SQLite 日志 + direct 直写 + file 缓存。
+      # 两个 SQLite 文件都放 storage 卷内（不用 database/ 目录，避免命名卷遮蔽镜像内 migrations）
+      DB_CONNECTION: sqlite
+      DB_DATABASE: /var/www/html/storage/app/easylog/meta.sqlite
+      SQLITE_LOG_PATH: /var/www/html/storage/app/easylog/logs.sqlite
+      STORAGE_DRIVER: sqlite
+      MQ_BUS_DRIVER: direct
+      CACHE_STORE: file
+      EASYLOG_ALERT_LOOPS: "${EASYLOG_ALERT_LOOPS:-0}"
+    volumes:
+      - easylog_lite_storage:/var/www/html/storage
+    ports:
+      - "9515:9515"
+
+  # ============================================================================
+  # core 档数据层（MySQL 使用宿主机实例，故此处不启动容器）
+  # ============================================================================
+  redis:
+    image: redis:7.4-alpine
+    container_name: easylog-redis
+    restart: unless-stopped
+    profiles: ["core"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: easylog-es
+    restart: unless-stopped
+    profiles: ["core"]
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      xpack.security.enabled: "false"
+      cluster.name: easylog
+      # 小内存机器关 mlock：内存紧张时 mlock=true 会因无法锁页导致 ES 启动失败
+      bootstrap.memory_lock: "false"
+    ports:
+      - "${ES_HTTP_PORT:-9200}:9200"
+      - "${ES_TRANSPORT_PORT:-9300}:9300"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    # ES 需要 vm.max_map_count >= 262144
+    privileged: true
+
+  # ============================================================================
+  # core 档内部 Kafka（业务总线）
+  # ============================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: easylog-zk
+    restart: unless-stopped
+    profiles: ["core"]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      # 单节点 ZK 256m 足够，默认 ~512m 偏浪费
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx256m"
+    volumes:
+      - zk_data:/var/lib/zookeeper/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: easylog-kafka
+    restart: unless-stopped
+    profiles: ["core"]
+    depends_on:
+      - zookeeper
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # 默认 1g，降到 512m 给小内存机器留余量
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ============================================================================
+  # full 档：测试用外部 MQ（业务方已有的 MQ 模拟）
+  # Erlang 常驻 ~0.7g，默认不启动；需要外部 MQ 接入时再起 full 档
+  # ============================================================================
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: easylog-rabbit
+    restart: unless-stopped
+    profiles: ["full", "external-mq"]
+    ports:
+      - "${RABBIT_PORT:-5672}:5672"
+      - "${RABBIT_MGMT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-easylog}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-easylog}
+    volumes:
+      - rabbit_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ============================================================================
+  # core 档应用层（共享 admin 镜像，按 SERVICE_ROLE 切换）
+  # DB 直连宿主机 MySQL（DB_HOST 默认 192.168.1.100，.env 可覆盖）
+  # 注意：EASYLOG_APP_KEY / EASYLOG_DB_PASSWORD 不用 :? 强校验 —— compose 变量
+  #       插值是文件级的，否则 lite 用户裸 up 会被 core 变量阻断；
+  #       强校验由 start.sh 的 core/full 分支承担。
+  # ============================================================================
+  admin:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      network: host
+    image: easylog/app:dev
+    container_name: easylog-admin
+    restart: unless-stopped
+    profiles: ["core"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment: &app-env-core
+      SERVICE_ROLE: admin
+      OCTANE_PORT: 9515
+      OCTANE_WORKERS: 2
+      # 关键变量直接以真实环境变量注入（不依赖容器内 .env 加载；
+      # phpdotenv 5.7 createImmutable 仅写 $_ENV/$_SERVER 不 putenv，
+      # Laravel env() 读真实进程环境变量最稳）
+      APP_KEY: "${EASYLOG_APP_KEY:-}"
+      APP_ENV: local
+      APP_DEBUG: "true"
+      DB_HOST: "${EASYLOG_DB_HOST:-192.168.1.100}"
+      DB_DATABASE: "log-service"
+      DB_USERNAME: "${EASYLOG_DB_USERNAME:-root}"
+      DB_PASSWORD: "${EASYLOG_DB_PASSWORD:-}"
+      DB_PORT: "3306"
+      DB_CONNECTION: mysql
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ""
+      REDIS_CLIENT: phpredis
+      KAFKA_BROKERS: kafka:9092
+      STORAGE_DRIVER: elasticsearch
+      ES_HOSTS: http://elasticsearch:9200
+      ES_INDEX_PREFIX: "easylog-"
+      MQ_BUS_DRIVER: rdkafka
+    volumes:
+      - ../../services/admin:/var/www/html
+      - admin_vendor:/var/www/html/vendor
+    ports:
+      - "9515:9515"
+
+  ingestion:
+    image: easylog/app:dev
+    container_name: easylog-ingestion
+    restart: unless-stopped
+    profiles: ["core"]
+    depends_on:
+      - admin
+    environment:
+      <<: *app-env-core
+      SERVICE_ROLE: ingestion
+      OCTANE_PORT: 9514
+    volumes:
+      - ../../services/admin:/var/www/html
+      - admin_vendor:/var/www/html/vendor
+    ports:
+      - "9514:9514"
+
+  query:
+    image: easylog/app:dev
+    container_name: easylog-query
+    restart: unless-stopped
+    profiles: ["core"]
+    depends_on:
+      - admin
+    environment:
+      <<: *app-env-core
+      SERVICE_ROLE: query
+    volumes:
+      - ../../services/admin:/var/www/html
+      - admin_vendor:/var/www/html/vendor
+    ports:
+      - "9517:9515"
+
+  writer:
+    image: easylog/app:dev
+    container_name: easylog-writer
+    restart: unless-stopped
+    profiles: ["core"]
+    depends_on:
+      - admin
+    environment:
+      <<: *app-env-core
+      SERVICE_ROLE: writer
+    volumes:
+      - ../../services/admin:/var/www/html
+      - admin_vendor:/var/www/html/vendor
+
+  # ============================================================================
+  # full 档 worker：外部 MQ 消费 + 命令行告警巡检
+  # ============================================================================
+  worker:
+    image: easylog/app:dev
+    container_name: easylog-worker
+    # 外部 MQ 消费者：无已配置端点时命令正常退出(0)，用 on-failure 避免无谓重启循环；
+    # 配置了外部 MQ 端点后需 full 档拉起。
+    restart: on-failure
+    profiles: ["full", "external-mq"]
+    depends_on:
+      - admin
+    environment:
+      <<: *app-env-core
+      SERVICE_ROLE: worker
+      RABBIT_HOST: rabbitmq
+      RABBIT_USER: ${RABBIT_USER:-easylog}
+      RABBIT_PASSWORD: ${RABBIT_PASS:-easylog}
+      # 告警邮件渠道（默认 log 驱动：邮件内容写日志不真发；配置 SMTP 后真发）
+      MAIL_MAILER: ${MAIL_MAILER:-log}
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:-easylog@localhost}
+      CONSUMER_KAFKA_ENABLED: "true"
+      # rabbitmq 仅 full 档启动，默认关闭其消费者避免连不上报错
+      CONSUMER_RABBITMQ_ENABLED: "false"
+      CONSUMER_REDIS_ENABLED: "true"
+      CONSUMER_ACTIVEMQ_ENABLED: "false"
+    volumes:
+      - ../../services/admin:/var/www/html
+      - admin_vendor:/var/www/html/vendor
+
+  # ============================================================================
+  # 前端控制台（nginx 静态服务 + /api 反代，lite/core/full 三档共用）
+  # 反代上游由 API_UPSTREAM 决定：lite → app:9515（默认），core/full → query:9515
+  #   （start.sh 按档位写入 .env；裸 up 默认按 lite 处理）
+  # 不写 depends_on：lite 与 core 的上游服务不同且不同 profile，
+  #   nginx 反代在 upstream 就绪前仅短暂 502，不影响最终可用
+  # ============================================================================
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.frontend
+      network: host
+    image: easylog/frontend:dev
+    container_name: easylog-frontend
+    restart: unless-stopped
+    profiles: ["lite", "core", "full"]
+    environment:
+      API_UPSTREAM: "${API_UPSTREAM:-app:9515}"
+    ports:
+      - "${FRONTEND_PORT:-9516}:80"
+
+volumes:
+  redis_data:
+  es_data:
+  zk_data:
+  kafka_data:
+  rabbit_data:
+  admin_vendor:
+  frontend_node_modules:
+  # lite 档：Laravel storage（SQLite 元数据/日志库 + file 缓存），避免写镜像层
+  easylog_lite_storage:

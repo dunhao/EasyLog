@@ -1,0 +1,263 @@
+# EasyLog 应用层：5 个服务角色共用 easylog/app:dev 镜像，SERVICE_ROLE 区分
+# admin 保持 1 副本（首次启动执行 migrate+seed，多副本会竞态）
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: easylog-admin
+  namespace: easylog
+  labels: { app: easylog-admin }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: easylog-admin }
+  template:
+    metadata:
+      labels: { app: easylog-admin }
+    spec:
+      containers:
+        - name: admin
+          image: easylog/app:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SERVICE_ROLE
+              value: admin
+            - name: OCTANE_PORT
+              value: "9515"
+            - name: OCTANE_WORKERS
+              value: "2"
+          envFrom:
+              - configMapRef:
+                  name: easylog-config
+              - secretRef:
+                  name: easylog-secret
+          ports:
+            - containerPort: 9515
+          readinessProbe:
+            httpGet: { path: /up, port: 9515 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          # 存活探针：Octane 进程卡死时由 K8s 重启 Pod
+          livenessProbe:
+            httpGet: { path: /up, port: 9515 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          volumeMounts:
+            # 控制平面（migrate/seed/应用运行日志）持久化；subPath 仅挂载 logs 子目录，
+            # 避免遮蔽镜像预创建的 storage/framework/cache/sessions 等目录
+            - name: storage
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: easylog-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: easylog-admin
+  namespace: easylog
+spec:
+  selector: { app: easylog-admin }
+  ports:
+    - port: 9515
+      targetPort: 9515
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: easylog-ingestion
+  namespace: easylog
+  labels: { app: easylog-ingestion }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: easylog-ingestion }
+  template:
+    metadata:
+      labels: { app: easylog-ingestion }
+    spec:
+      containers:
+        - name: ingestion
+          image: easylog/app:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SERVICE_ROLE
+              value: ingestion
+            - name: OCTANE_PORT
+              value: "9514"
+            - name: OCTANE_WORKERS
+              value: "2"
+          envFrom:
+              - configMapRef:
+                  name: easylog-config
+              - secretRef:
+                  name: easylog-secret
+          ports:
+            - containerPort: 9514
+          readinessProbe:
+            httpGet: { path: /api/v1/ingest/heartbeat, port: 9514 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          # 存活探针：Swoole 网关卡死时由 K8s 重启 Pod
+          livenessProbe:
+            httpGet: { path: /api/v1/ingest/heartbeat, port: 9514 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: easylog-ingestion
+  namespace: easylog
+spec:
+  selector: { app: easylog-ingestion }
+  ports:
+    - port: 9514
+      targetPort: 9514
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: easylog-query
+  namespace: easylog
+  labels: { app: easylog-query }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: easylog-query }
+  template:
+    metadata:
+      labels: { app: easylog-query }
+    spec:
+      containers:
+        - name: query
+          image: easylog/app:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SERVICE_ROLE
+              value: query
+            - name: OCTANE_PORT
+              value: "9515"
+            - name: OCTANE_WORKERS
+              value: "2"
+          envFrom:
+              - configMapRef:
+                  name: easylog-config
+              - secretRef:
+                  name: easylog-secret
+          ports:
+            - containerPort: 9515
+          readinessProbe:
+            httpGet: { path: /up, port: 9515 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          # 存活探针：Octane 进程卡死时由 K8s 重启 Pod
+          livenessProbe:
+            httpGet: { path: /up, port: 9515 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: easylog-query
+  namespace: easylog
+spec:
+  selector: { app: easylog-query }
+  ports:
+    - port: 9515
+      targetPort: 9515
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: easylog-writer
+  namespace: easylog
+  labels: { app: easylog-writer }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: easylog-writer }
+  template:
+    metadata:
+      labels: { app: easylog-writer }
+    spec:
+      # writer 为常驻命令（easylog:writer），无 HTTP 服务；崩溃由 Deployment
+      # restartPolicy(Always) 拉起，故不配置 liveness/readiness 探针
+      # （exec 探活需 pgrep，基础镜像未预装 procps）。worker 同理。
+      containers:
+        - name: writer
+          image: easylog/app:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SERVICE_ROLE
+              value: writer
+          envFrom:
+              - configMapRef:
+                  name: easylog-config
+              - secretRef:
+                  name: easylog-secret
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: easylog-worker
+  namespace: easylog
+  labels: { app: easylog-worker }
+spec:
+  # worker 含告警评估/投递后台进程，多副本会重复评估，保持 1 副本
+  replicas: 1
+  selector:
+    matchLabels: { app: easylog-worker }
+  template:
+    metadata:
+      labels: { app: easylog-worker }
+    spec:
+      containers:
+        - name: worker
+          image: easylog/app:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SERVICE_ROLE
+              value: worker
+          envFrom:
+              - configMapRef:
+                  name: easylog-config
+              - secretRef:
+                  name: easylog-secret
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+---
+# 控制平面持久卷：仅 admin 挂载（subPath: logs），用于保留迁移/seed/应用运行日志。
+# ReadWriteOnce 即可（admin 保持 1 副本）。其它角色使用容器临时存储（emptyDir 行为），
+# 日志不持久化可接受；如需持久化可改为 ReadWriteMany CSI 或按需挂载。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: easylog-storage
+  namespace: easylog
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+

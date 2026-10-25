@@ -1,0 +1,23 @@
+# Ingress：控制台域名 → frontend（/api 由 frontend 内置反代转发，亦可在此直挂 query）
+# 按集群 IngressClass 修改 ingressClassName 与 host 后取消注释使用
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: easylog
+  namespace: easylog
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: easylog.example.com   # 部署前替换为实际域名
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: easylog-frontend
+                port:
+                  number: 80

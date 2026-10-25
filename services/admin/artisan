@@ -1,0 +1,21 @@
+#!/usr/bin/env php
+<?php
+
+use Illuminate\Foundation\Application;
+use Symfony\Component\Console\Input\ArgvInput;
+
+define('LARAVEL_START', microtime(true));
+
+// Bootstrap Laravel
+require __DIR__.'/vendor/autoload.php';
+
+/** @var Application $app */
+$app = require_once __DIR__.'/bootstrap/app.php';
+
+$input = new ArgvInput($argv);
+
+$status = $app->handleCommand($input);
+
+$status = $status ?? 0;
+
+exit($status);
